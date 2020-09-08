@@ -1,6 +1,8 @@
+local sharedevents
 if __Profiler then
-  require("__debugadapter__/profile-control.lua")
-  return
+  sharedevents = require("__debugadapter__/profile-control.lua")
+else
+  sharedevents = require("__debugadapter__/debug-control.lua")
 end
 --[[
   debugger requires primary handler for some events, use these instead to be
@@ -12,4 +14,9 @@ end
     on_tick = function?,
   }
 ]]
-local sharedevents = require("__debugadapter__/debug-control.lua")
+
+if (__DebugAdapter or __Profiler).instrument then
+  for event, handler in pairs(require("scripts.listeners")) do
+    sharedevents[event] = handler
+  end
+end
