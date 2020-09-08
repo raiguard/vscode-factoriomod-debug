@@ -34,6 +34,14 @@ event.on_configuration_changed(function(e)
   global_data.init()
 end)
 
+-- CUSTOM INPUT
+
+if __DebugAdapter then
+  event.register("debugadapter-toggle-event-log", function()
+    event_log_gui.toggle()
+  end)
+end
+
 -- DISPLAY
 
 event.register({defines.events.on_player_display_resolution_changed, defines.events.on_player_display_scale_changed}, function(e)

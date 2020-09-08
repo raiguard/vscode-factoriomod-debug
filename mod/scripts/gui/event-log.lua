@@ -2,6 +2,17 @@ local event_log_gui = {}
 
 local gui = require("__flib__.gui")
 
+local constants = require("scripts.constants")
+
+local function rich_text(key, value, inner)
+  if key == "color" then
+    value = constants.colors[value]
+  elseif key == "font" then
+    value = constants.fonts[value]
+  end
+  return "["..key.."="..value.."]"..inner.."[/"..key.."]"
+end
+
 gui.add_handlers{
   event_log = {
     close_button = {
@@ -11,6 +22,20 @@ gui.add_handlers{
     }
   }
 }
+
+local function generate_dummy_text()
+  local children = {}
+  for i = 1, 50 do
+    children[i] = {type="label",
+    caption=rich_text("font", "tick", rich_text("color", "tick", "0."))
+    .." "
+    ..rich_text("color", "event_name", "on_player_created ")
+    ..rich_text("font", "tick", rich_text("color", "tick", i.."  "))
+    .."{player_index=1}"
+  }
+  end
+  return children
+end
 
 function event_log_gui.create(player)
   local elems = gui.build(player.gui.screen, {
@@ -27,7 +52,21 @@ function event_log_gui.create(player)
           save_as="titlebar.close_button"
         }
       }},
-      {type="frame", style="inside_shallow_frame", style_mods={width=300, height=300}}
+      {type="frame", style="inside_deep_frame", direction="vertical", children={
+        {type="frame", style="subheader_frame", children={
+          -- setting margin on switches doesn't work properly...
+          {type="flow", style_mods={left_margin=8}, children={
+            {type="switch", left_label_caption="Off", right_label_caption="On"},
+          }},
+          {type="empty-widget", style="flib_horizontal_pusher"}
+        }},
+        {type="scroll-pane",
+          style="flib_naked_scroll_pane_no_padding",
+          style_mods={width=700, height=500, left_padding=6, top_padding=2, right_padding=6, bottom_padding=2},
+          direction="vertical",
+          children=generate_dummy_text()
+        }
+      }}
     }}
   })
   elems.window.force_auto_center()

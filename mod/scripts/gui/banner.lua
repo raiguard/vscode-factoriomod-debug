@@ -13,8 +13,16 @@ function banner_gui.create(player)
       elem_mods={ignored_by_interaction=true},
       save_as="flow",
       children={
-        {type="frame", style="debugadapter_"..mode.."_banner", style_mods={horizontally_stretchable=true}, elem_mods={ignored_by_interaction=true}},
-        {type="label", style_mods={font="default-game", font_color=color}, caption=label, elem_mods={ignored_by_interaction=true}}
+        {type="frame",
+          style="debugadapter_"..mode.."_banner",
+          style_mods={horizontally_stretchable=true},
+          elem_mods={ignored_by_interaction=true}
+        },
+        {type="label",
+          style_mods={font="default-game", font_color=color},
+          caption=label,
+          elem_mods={ignored_by_interaction=true}
+        }
       }
     }
   })
