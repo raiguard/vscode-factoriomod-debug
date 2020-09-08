@@ -3,15 +3,7 @@ local event_log_gui = {}
 local gui = require("__flib__.gui")
 
 local constants = require("scripts.constants")
-
-local function rich_text(key, value, inner)
-  if key == "color" then
-    value = constants.colors[value]
-  elseif key == "font" then
-    value = constants.fonts[value]
-  end
-  return "["..key.."="..value.."]"..inner.."[/"..key.."]"
-end
+local formatter = require("scripts.formatter")
 
 gui.add_handlers{
   event_log = {
@@ -19,23 +11,16 @@ gui.add_handlers{
       on_gui_click = function()
         global.gui.event_log.window.visible = false
       end
+    },
+    item = {
+      on_gui_click = function(e)
+        local _, _, index = string.find(e.element.name, "debugadapter_event_log_item__(%d*)")
+        local event_data = global.event_log.items[tonumber(index)]
+        __DebugAdapter.breakpoint("Inspecting event data")
+      end
     }
   }
 }
-
-local function generate_dummy_text()
-  local children = {}
-  for i = 1, 50 do
-    children[i] = {type="label",
-    caption=rich_text("font", "tick", rich_text("color", "tick", "0."))
-    .." "
-    ..rich_text("color", "event_name", "on_player_created ")
-    ..rich_text("font", "tick", rich_text("color", "tick", i.."  "))
-    .."{player_index=1}"
-  }
-  end
-  return children
-end
 
 function event_log_gui.create(player)
   local elems = gui.build(player.gui.screen, {
@@ -53,18 +38,19 @@ function event_log_gui.create(player)
         }
       }},
       {type="frame", style="inside_deep_frame", direction="vertical", children={
-        {type="frame", style="subheader_frame", children={
-          -- setting margin on switches doesn't work properly...
-          {type="flow", style_mods={left_margin=8}, children={
-            {type="switch", left_label_caption="Off", right_label_caption="On"},
-          }},
-          {type="empty-widget", style="flib_horizontal_pusher"}
-        }},
+        -- {type="frame", style="subheader_frame", children={
+        --   -- setting margin on switches doesn't work properly...
+        --   {type="flow", style_mods={left_margin=8}, children={
+        --     {type="switch", left_label_caption="Off", right_label_caption="On", switch_state="right"},
+        --   }},
+        --   {type="empty-widget", style="flib_horizontal_pusher"}
+        -- }},
         {type="scroll-pane",
           style="flib_naked_scroll_pane_no_padding",
-          style_mods={width=700, height=500, left_padding=6, top_padding=2, right_padding=6, bottom_padding=2},
+          style_mods={width=1000, height=500, left_padding=6, top_padding=2, right_padding=6, bottom_padding=2},
           direction="vertical",
-          children=generate_dummy_text()
+          horizontal_scroll_policy="never",
+          save_as="log_scroll_pane"
         }
       }}
     }}
@@ -72,11 +58,35 @@ function event_log_gui.create(player)
   elems.window.force_auto_center()
   elems.titlebar.flow.drag_target = elems.window
 
+  gui.update_filters("event_log.item", player.index, {"debugadapter_event_log_item"}, "add")
+
   global.gui.event_log = elems
 end
 
 function event_log_gui.toggle()
   global.gui.event_log.window.visible = not global.gui.event_log.window.visible
+end
+
+function event_log_gui.log(e)
+  if not global.gui.event_log then return end
+  local scroll = global.gui.event_log.log_scroll_pane
+  local children_count = #scroll.children
+  local caption, event_data = formatter(e)
+  local next_index = global.event_log.next_index
+  local new_line = scroll.add{
+    type = "label",
+    name = "debugadapter_event_log_item__"..next_index,
+    caption = caption
+  }
+  global.event_log.items[next_index] = event_data
+  global.event_log.next_index = next_index + 1
+  if children_count == 100 then
+    local first = scroll.children[1]
+    local _, _, index = string.find(first.name, "debugadapter_event_log_item__(%d*)")
+    global.event_log.items[tonumber(index)] = nil
+    first.destroy()
+  end
+  scroll.scroll_to_element(new_line)
 end
 
 return event_log_gui

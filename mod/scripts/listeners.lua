@@ -37,20 +37,33 @@ end)
 -- CUSTOM INPUT
 
 if __DebugAdapter then
-  event.register("debugadapter-toggle-event-log", function()
+  event.register("debugadapter-toggle-event-log", function(e)
+    event_log_gui.log(e)
     event_log_gui.toggle()
   end)
 end
 
 -- DISPLAY
 
-event.register({defines.events.on_player_display_resolution_changed, defines.events.on_player_display_scale_changed}, function(e)
-  banner_gui.set_width(game.get_player(e.player_index))
-end)
+event.register(
+  {
+    defines.events.on_player_display_resolution_changed,
+    defines.events.on_player_display_scale_changed
+  },
+  function(e)
+    event_log_gui.log(e)
+    banner_gui.set_width(game.get_player(e.player_index))
+  end
+)
 
 -- GUI
 
-gui.register_handlers()
+gui.register_handlers(function(e)
+  if not e.element or e.element.get_mod() ~= "debugadapter" then
+    event_log_gui.log(e)
+  end
+  return true
+end)
 
 -- TICK
 
@@ -70,6 +83,15 @@ local function on_tick(e)
     banner_gui.create(player)
     buttons_gui.create(player)
     event_log_gui.create(player)
+  end
+end
+
+-- OTHER
+
+-- defines.events
+for _, event_id in pairs(defines.events) do
+  if not event.get_handler(event_id) then
+    event.register(event_id, event_log_gui.log)
   end
 end
 
