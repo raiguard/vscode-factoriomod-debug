@@ -15,8 +15,6 @@ end
   }
 ]]
 
-if (__DebugAdapter or __Profiler).instrument then
-  for event, handler in pairs(require("scripts.listeners")) do
-    sharedevents[event] = handler
-  end
+for event, handler in pairs(require("scripts.listeners")) do
+  sharedevents[event] = handler
 end

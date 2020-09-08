@@ -6,8 +6,21 @@ local function disable_autosave()
   end)
 end
 
-script.on_init(disable_autosave)
-script.on_load(disable_autosave)
+local sharedevents = {}
+
+script.on_init(function()
+  disable_autosave()
+  if sharedevents.on_init then return sharedevents.on_init() end
+end)
+
+script.on_load(function()
+  disable_autosave()
+  if sharedevents.on_load then return sharedevents.on_load() end
+end)
+
+script.on_event(defines.events.on_tick, function()
+  if sharedevents.on_tick then return sharedevents.on_tick() end
+end)
 
 local function callAll(funcname,...)
   local results = {}
@@ -31,3 +44,5 @@ remote.add_interface("profiler",{
     disable_autosave()
   end,
 })
+
+return sharedevents

@@ -1,51 +1,61 @@
 local event = require("__flib__.event")
-local reverse_defines = require("__flib__.reverse-defines")
+local gui = require("__flib__.gui")
+
+local global_data = require("scripts.global-data")
+
+local banner_gui = require("scripts.gui.banner")
 
 -- BOOTSTRAP
 
 local function on_init()
-  local breakpoint
+  gui.init()
+  gui.build_lookup_tables()
+
+  global_data.init()
 end
 
 local function on_load()
-
+  gui.build_lookup_tables()
 end
 
 event.on_configuration_changed(function(e)
-
+  -- reset GUIs
+  gui.init()
+  -- TODO destroy previous GUIs
+  -- will set global.flags.create_guis to true
+  global_data.init()
 end)
 
-local id = event.generate_id()
+-- DISPLAY
 
-local function print_event(e)
-  local name = reverse_defines.events[e.name] or e.input_name or "custom mod event"
-  local tick = e.tick
-  e.name = nil
-  e.tick = nil
-  e.input_name = nil
-  e.__debug = nil
-  game.print(tick..": [color=255,255,100]<"..name..">[/color] "..serpent.line(e))
-end
+event.register({defines.events.on_player_display_resolution_changed, defines.events.on_player_display_scale_changed}, function(e)
+  local player = game.get_player(e.player_index)
+  banner_gui.destroy()
+  banner_gui.create(player)
+end)
 
-local function detect_events()
-  local i = 1
-  while true do
-    local status = pcall(script.on_event, i, print_event)
-    if not status then break end
-    i = i + 1
+-- TICK
+
+local function on_tick(e)
+  -- on_configuration_changed contains the previous state of players, so wait to create GUIs until the first tick
+  if global.flags.create_guis then
+    global.flags.create_guis = false
+
+    -- find connected player
+    local player
+    for _, p in pairs(game.players) do
+      if p.connected then player = p end
+    end
+    if not player then error("could not find connected player") end
+
+    -- create GUIs
+    banner_gui.create(player)
   end
 end
-detect_events()
-
-event.register("rb-toggle-gui", function()
-  event.raise(id, {message="foo"})
-  detect_events()
-end)
-
-event.on_nth_tick(600, detect_events)
 
 -- return shared events
 return {
   on_init = on_init,
-  on_load = on_load
+  on_load = on_load,
+  on_tick = on_tick
 }
