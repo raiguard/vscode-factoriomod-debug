@@ -1,3 +1,5 @@
+-- the debugger is only usable in singleplayer, so the code assumes that only one player is connected
+
 local event = require("__flib__.event")
 local gui = require("__flib__.gui")
 
@@ -19,19 +21,21 @@ local function on_load()
 end
 
 event.on_configuration_changed(function(e)
-  -- reset GUIs
   gui.init()
-  -- TODO destroy previous GUIs
-  -- will set global.flags.create_guis to true
+
+  -- destroy all GUIs
+  for _, tbl in pairs(global.gui) do
+    tbl.parent.destroy()
+  end
+
+  -- reset global
   global_data.init()
 end)
 
 -- DISPLAY
 
 event.register({defines.events.on_player_display_resolution_changed, defines.events.on_player_display_scale_changed}, function(e)
-  local player = game.get_player(e.player_index)
-  banner_gui.destroy()
-  banner_gui.create(player)
+  banner_gui.set_width(game.get_player(e.player_index))
 end)
 
 -- TICK

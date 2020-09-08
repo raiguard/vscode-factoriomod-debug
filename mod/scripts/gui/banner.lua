@@ -18,11 +18,11 @@ function banner_gui.create(player)
       }
     }
   })
-  global.gui.banner = elems.flow
+  global.gui.banner = {window=elems.flow}
 end
 
-function banner_gui.destroy()
-  global.gui.banner.destroy()
+function banner_gui.set_width(player)
+  global.gui.banner.window.style.width = player.display_resolution.width / player.display_scale
 end
 
 return banner_gui
