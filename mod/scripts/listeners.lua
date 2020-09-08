@@ -6,6 +6,8 @@ local gui = require("__flib__.gui")
 local global_data = require("scripts.global-data")
 
 local banner_gui = require("scripts.gui.banner")
+local buttons_gui = require("scripts.gui.buttons")
+local event_log_gui = require("scripts.gui.event-log")
 
 -- BOOTSTRAP
 
@@ -38,6 +40,10 @@ event.register({defines.events.on_player_display_resolution_changed, defines.eve
   banner_gui.set_width(game.get_player(e.player_index))
 end)
 
+-- GUI
+
+gui.register_handlers()
+
 -- TICK
 
 local function on_tick(e)
@@ -54,6 +60,8 @@ local function on_tick(e)
 
     -- create GUIs
     banner_gui.create(player)
+    buttons_gui.create(player)
+    event_log_gui.create(player)
   end
 end
 
