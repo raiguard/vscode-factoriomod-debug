@@ -265,6 +265,8 @@ class ProfileData {
 
 
 export class Profile extends EventEmitter implements vscode.Disposable  {
+	private readonly context: vscode.ExtensionContext;
+
 	private profileData = new ProfileData();
 	private profileTreeRoot = new ProfileTreeNode("root",0);
 
@@ -275,9 +277,10 @@ export class Profile extends EventEmitter implements vscode.Disposable  {
 	private statusBar: vscode.StatusBarItem;
 	private flamePanel?: vscode.WebviewPanel;
 
-	constructor(withTree:boolean)
+	constructor(withTree:boolean, context: vscode.ExtensionContext)
 	{
 		super();
+		this.context = context;
 		this.timeDecorationType = vscode.window.createTextEditorDecorationType({
 			before: {
 				contentText:"",
@@ -338,14 +341,12 @@ export class Profile extends EventEmitter implements vscode.Disposable  {
 		}
 	}
 
-	private createFlamePanel()
+	private async createFlamePanel()
 	{
 		if (this.flamePanel)
 		{
 			return;
 		}
-
-		const ext = vscode.extensions.getExtension("justarandomgeek.factoriomod-debug")!;
 
 		this.flamePanel = vscode.window.createWebviewPanel(
 			'factorioProfile',
@@ -353,61 +354,17 @@ export class Profile extends EventEmitter implements vscode.Disposable  {
 			vscode.ViewColumn.Two,
 			{
 				enableScripts: true,
-				localResourceRoots: [ ext.extensionUri ],
+				localResourceRoots: [ this.context.extensionUri ],
 			}
 		);
 		const flameview = this.flamePanel.webview;
-		flameview.html =
-`<!DOCTYPE html>
-<html lang="en">
-<head>
-	<link rel="stylesheet" type="text/css" href="${flameview.asWebviewUri(vscode.Uri.joinPath(ext.extensionUri,"node_modules/d3-flame-graph/dist/d3-flamegraph.css"))}">
-</head>
-<body>
-	<div id="chart"></div>
-	<script type="text/javascript" src="${flameview.asWebviewUri(vscode.Uri.joinPath(ext.extensionUri,"node_modules/d3/dist/d3.js"))}"></script>
-	<script type="text/javascript" src="${flameview.asWebviewUri(vscode.Uri.joinPath(ext.extensionUri,"node_modules/d3-flame-graph/dist/d3-flamegraph.js"))}"></script>
-	<script type="text/javascript">
-	const vscode = acquireVsCodeApi();
-	var chart = flamegraph().height(window.innerHeight-20).width(window.innerWidth-60);
-	var formatNum = function(num,digits){
-		return Number(num).toFixed(digits);
-	};
-	chart.label(function(d){
-		return d.data.name + ' (' + formatNum(100 * (d.x1 - d.x0),3) + '%, ' + formatNum(d.value,3) + ' ms)'
-	});
-	var treeData = {
-		"name":"root",
-		"value":0,
-		"children":[]
-	};
-	d3.select("#chart").datum(treeData).call(chart);
+		flameview.html = (await vscode.workspace.fs.readFile(
+			vscode.Uri.joinPath(this.context.extensionUri,"profile_flamegraph.html"))).toString().replace(
+				/(src|href)="([^"]+)"/g,(_,attr,value)=>{
+					return `${attr}="${flameview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri,value))}"`;
+				}
+			);
 
-	chart.onClick(function (d) {
-		vscode.postMessage({
-			command: 'click',
-			name: d.data.name,
-			filename: d.data.filename,
-			line: d.data.line,
-		});
-	});
-
-	window.addEventListener('message', event => {
-		const message = event.data;
-		switch (message.command) {
-			case 'update':
-				chart.update(message.data);
-				break;
-			case 'merge':
-				chart.merge(message.data);
-				break;
-		}
-	});
-	vscode.postMessage({command: 'init'});
-	</script>
-</body>
-</html>
-`;
 		flameview.onDidReceiveMessage(
 			(mesg:{command:"init"}|{command:"click";name:string;filename?:string;line?:number})=>{
 			switch (mesg.command) {
