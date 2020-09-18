@@ -6,3 +6,5 @@ npm-debug.log
 mock-debug.txt
 *.vsix
 *.zip
+*.code-workspace
+mod/.vscode
