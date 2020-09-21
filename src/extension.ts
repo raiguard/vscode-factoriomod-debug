@@ -125,7 +125,7 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 	 * Massage a debug configuration just before a debug session is being launched,
 	 * e.g. add all missing attributes to the debug configuration.
 	 */
-	async resolveDebugConfiguration(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration|undefined> {
+	async resolveDebugConfigurationWithSubstitutedVariables(folder: vscode.WorkspaceFolder | undefined, config: vscode.DebugConfiguration, token?: vscode.CancellationToken): Promise<vscode.DebugConfiguration|undefined> {
 		// factorio path exists and is a file (and is a binary?)
 
 		if (!config.factorioPath) {
@@ -143,8 +143,12 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 			}
 		}
 
-		if(!config.factorioPath || !fs.existsSync(config.factorioPath) ){
+		if(!config.factorioPath){
 			vscode.window.showInformationMessage("factorioPath is required");
+			return undefined;	// abort launch
+		}
+		if(!fs.existsSync(config.factorioPath) ){
+			vscode.window.showInformationMessage(`factorioPath "${config.factorioPath}" does not exist`);
 			return undefined;	// abort launch
 		}
 		const args:string[] = config.factorioArgs;

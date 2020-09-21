@@ -74,6 +74,11 @@ local function evalmeta(frameId,alsoLookIn)
               offset = i - 1
               break
             end
+          else
+            -- we got all the way up the stack without finding where the eval was happening
+            -- probably outlived it, so go ahead and and clear the frame to stop looking...
+            frameId = nil
+            break
           end
           i = i + 1
         end
@@ -135,6 +140,11 @@ local function evalmeta(frameId,alsoLookIn)
               offset = i - 1
               break
             end
+          else
+            -- we got all the way up the stack without finding where the eval was happening
+            -- probably outlived it, so go ahead and and clear the frame to stop looking...
+            frameId = nil
+            break
           end
           i = i + 1
         end
@@ -253,16 +263,20 @@ end
 ---@param expression string
 ---@param seq number
 function __DebugAdapter.evaluate(frameId,context,expression,seq)
-  if not frameId then
-    -- if you manage to do one of these fast enough for data, go for it...
-    if not data and __DebugAdapter.canRemoteCall() and script.mod_name~="level" then
-      -- remote to `level` if possible, else just error
-      if remote.interfaces["__debugadapter_level"] then
-        -- transfer ref out first, just in case...
-        __DebugAdapter.transferRef()
-        return remote.call("__debugadapter_level","evaluate",frameId,context,expression,seq)
+  -- if you manage to do one of these fast enough for data, go for it...
+  if not frameId and not data then
+    local modname,rest = expression:match("^__(.-)__ (.+)$")
+    if modname then
+      expression = rest
+    else
+      modname = "level"
+    end
+    if script.mod_name~=modname then
+      -- remote to named state if possible, else just error
+      if __DebugAdapter.canRemoteCall() and remote.interfaces["__debugadapter_"..modname] then
+        return remote.call("__debugadapter_"..modname,"evaluate",frameId,context,expression,seq)
       else
-        print("DBGeval: " .. json.encode({result = "`level` not available for eval", type="error", variablesReference=0, seq=seq}))
+        print("DBGeval: " .. json.encode({result = "`"..modname.."` not available for eval", type="error", variablesReference=0, seq=seq}))
         return
       end
     end
@@ -307,5 +321,4 @@ function __DebugAdapter.evaluate(frameId,context,expression,seq)
     evalresult = {result = "Cannot Evaluate in Remote Frame", type="error", variablesReference=0, seq=seq}
   end
   print("DBGeval: " .. json.encode(evalresult))
-  __DebugAdapter.transferRef()
 end

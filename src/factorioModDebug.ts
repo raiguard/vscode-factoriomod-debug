@@ -2,7 +2,7 @@ import {
 	Logger, logger,
 	LoggingDebugSession,
 	StoppedEvent, OutputEvent,
-	Thread, Source, Module, ModuleEvent, InitializedEvent, StackFrame, Scope, Variable, Event
+	Thread, Source, Module, ModuleEvent, InitializedEvent, StackFrame, Scope, Variable, Event, TerminatedEvent
 } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import * as path from 'path';
@@ -60,6 +60,8 @@ interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
 
 	hookLog?:boolean
 	keepOldLog?:boolean
+
+	runningBreak?:number
 
 	profileLines?:boolean
 	profileFuncs?:boolean
@@ -330,13 +332,19 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 
 		this.factorio = new FactorioProcess(args.factorioPath,args.factorioArgs,args.nativeDebugger);
 
-		this.factorio.on("exit", (code:number, signal:string) => {
+		this.factorio.on("exit", (code:number|null, signal:string) => {
 			if (this.profile)
 			{
 				this.profile.dispose();
 				this.profile = undefined;
 			}
-			this.sendEvent(new Event("exited",{exitCode:code}));
+			if (code)
+			{
+				// exit event in case somebody cares about the return code
+				this.sendEvent(new Event("exited",{exitCode:code}));
+			}
+			// and terminate event to actually stop the debug session
+			this.sendEvent(new TerminatedEvent());
 		});
 
 		let resolveModules:resolver<void>;
@@ -374,7 +382,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					this.continue(true);
 				} else if (event === "getref") {
 					//pass in nextref
-					this.writeStdin(`__DebugAdapter.transferRef(${this.nextRef})`);
+					this.writeStdin(`__DebugAdapter.transferRef(${this.nextRef++})`);
 					this.continue();
 					this.inPrompt = wasInPrompt;
 				} else if (event === "leaving" || event === "running") {
@@ -468,8 +476,6 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					FactorioModDebugSession.output.appendLine("unexpected event: " + event);
 					this.continue();
 				}
-			} else if (mesg.startsWith("DBGnextref: ")) {
-				this.nextRef = parseInt(mesg.substring(12).trim());
 			} else if (mesg.startsWith("DBGlogpoint: ")) {
 				const body = JSON.parse(mesg.substring(13).trim());
 				const e:DebugProtocol.OutputEvent = new OutputEvent(body.output+"\n", "console");
@@ -996,6 +1002,10 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 			if (this.launchArgs.keepOldLog !== undefined)
 			{
 				hookopts += `keepoldlog=${this.launchArgs.keepOldLog},`;
+			}
+			if (this.launchArgs.runningBreak !== undefined)
+			{
+				hookopts += `runningBreak=${this.launchArgs.runningBreak}`;
 			}
 
 			this.writeStdin(`__DebugAdapter={${hookopts}}`);

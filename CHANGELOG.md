@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.18.38
+
+* Fixed debug session not ending when factorio closes
+
 ## 0.18.37
 
 * Return original unwrapped handler from `script.get_event_handler`
@@ -12,6 +16,10 @@
 * Debug console can be used while running - it will run in the active Lua State for settings/data or in `level` if available for control.
 * Correctly display and offer more color formats in locale
 * Task "adjustMods" can be used to reconfigure mods from vscode
+* Fix infinite loop in eval _ENV lookups when function outlives the eval that created it
+* Support vscode vars in launch.json config
+* Debug console supports `__modname__` prefix when named Lua State is available
+* Branch name for Publish is configurable
 
 ## 0.18.36
 
