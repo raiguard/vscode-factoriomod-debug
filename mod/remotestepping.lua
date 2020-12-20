@@ -22,12 +22,11 @@ local newremote = {
 local stacks = {}
 local myRemotes = {}
 
----@return StackFrame[]
 ---@return string
 function remotestepping.parentState()
   local level = stacks[#stacks]
   if level then
-    return level.stack, level.name
+    return level.name
   end
 end
 
@@ -35,16 +34,14 @@ if __DebugAdapter.instrument then
   --- Transfer stepping state and perform the call. Vararg arguments will be forwarded to the
   --- remote function, and any return value from the remote will be returned with the new stepping state in a table.
   ---@param parentstep string "remote"*("next" | "in" | "over" | "out")
-  ---@param parentstack StackFrame[]
   ---@param pcallresult boolean
   ---@param interface string
   ---@param func string
   ---@return table
-  function remotestepping.callInner(parentstep,parentstack,pcallresult,interface,func,...)
+  function remotestepping.callInner(parentstep,pcallresult,interface,func,...)
     __DebugAdapter.pushEntryPointName("hookedremote")
     stacks[#stacks+1] = {
-      stack = parentstack,
-      name = func,
+      name = "remote "..interface.."::"..func,
     }
     if parentstep and (parentstep == "over" or parentstep == "out" or parentstep:match("^remote")) then
       parentstep = "remote" .. parentstep
@@ -86,9 +83,15 @@ if __DebugAdapter.instrument then
     local debugname = call("debugadapter","whois",interface)
     if debugname then
       debugname = "__debugadapter_" .. debugname
+      __DebugAdapter.pushStack{
+        source = "remote",
+        mod_name = script.mod_name,
+        stack = __DebugAdapter.stackTrace(-2, true),
+      }
       local result,multreturn = call(debugname,"remoteCallInner",
-        __DebugAdapter.currentStep(), __DebugAdapter.stackTrace(-2, nil, true), false,
+        __DebugAdapter.currentStep(), false,
         interface, func, ...)
+      __DebugAdapter.popStack()
 
       local childstep = result.step
       result = result.result
@@ -109,16 +112,14 @@ else -- not __DebugAdapter.instrument
   --- Transfer stepping state and perform the call. Vararg arguments will be forwarded to the
   --- remote function, and any return value from the remote will be returned with the new stepping state in a table.
   ---@param parentstep string "remote"*("next" | "in" | "over" | "out")
-  ---@param parentstack StackFrame[]
   ---@param pcallresult boolean
   ---@param interface string
   ---@param func string
   ---@return table
-  function remotestepping.callInner(parentstep,parentstack,pcallresult,interface,func,...)
+  function remotestepping.callInner(parentstep,pcallresult,interface,func,...)
     __DebugAdapter.pushEntryPointName("hookedremote")
     stacks[#stacks+1] = {
-      stack = parentstack,
-      name = func,
+      name = "remote "..interface.."::"..func,
     }
     if parentstep and (parentstep == "over" or parentstep == "out" or parentstep:match("^remote")) then
       parentstep = "remote" .. parentstep
@@ -160,9 +161,15 @@ else -- not __DebugAdapter.instrument
     local debugname = call("debugadapter","whois",interface)
     if debugname then
       debugname = "__debugadapter_" .. debugname
+      __DebugAdapter.pushStack{
+        source = "remote",
+        mod_name = script.mod_name,
+        stack = __DebugAdapter.stackTrace(-2, true),
+      }
       local result,multreturn = call(debugname,"remoteCallInner",
-        __DebugAdapter.currentStep(), __DebugAdapter.stackTrace(-2, nil, true), true,
+        __DebugAdapter.currentStep(), true,
         interface, func, ...)
+      __DebugAdapter.popStack()
 
       local childstep = result.step
       result = result.result
@@ -216,6 +223,7 @@ local remotemeta = {
   __index = oldremote,
   __newindex = function(t,k,v) oldremote[k] = v end,
   __debugline = "<LuaRemote Debug Proxy>",
+  __debugtype = "DebugAdapter.LuaRemote",
   __debugchildren = function(t)
     return {
       variables.create([["interfaces"]],oldremote.interfaces),

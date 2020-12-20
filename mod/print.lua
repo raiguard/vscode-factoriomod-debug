@@ -1,8 +1,10 @@
 local __DebugAdapter = __DebugAdapter
+local debug = debug
 local variables = require("__debugadapter__/variables.lua") -- uses pcall
 local normalizeLuaSource = require("__debugadapter__/normalizeLuaSource.lua")
 require("__debugadapter__/evaluate.lua") -- uses pcall
 local json = require('__debugadapter__/json.lua')
+local print = print
 
 ---@param expr any
 ---@param alsoLookIn table
@@ -19,7 +21,7 @@ function __DebugAdapter.print(expr,alsoLookIn,upStack,category)
     if texpr == "table" then
       expr = {expr}
     end
-    local v = variables.create("",expr, nil, true)
+    local v = variables.create(nil,expr, nil, true)
     result = v.value
     ref = v.variablesReference
   end

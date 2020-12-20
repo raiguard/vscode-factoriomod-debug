@@ -1,4 +1,6 @@
+local invert = require("__debugadapter__/enumutil.lua").invert
 local __DebugAdapter = __DebugAdapter
+local pcall = pcall
 local luaObjectLines = {
   ---@param stack LuaItemStack
   ---@param short boolean | nil
@@ -22,8 +24,152 @@ local luaObjectLines = {
 }
 __DebugAdapter.stepIgnoreAll(luaObjectLines)
 
+-- some API functions can raise events, so we want to record the stack somewhere
+-- and indicate that it needs to be requested if something stops in the lower stack
+-- API functions (including metas) have two upval:
+-- userdata(pointer to object), userdata(pointer to member function)
+-- all functions from one object will have the same value in the first
+-- all instances of the same class::function will have the same value in the second
+local eventlike = {
+  members = {
+    -- userdata => {class="",member=""}
+  },
+  classes = {
+    __index = {
+      LuaGameScript = {
+        create_surface = true,
+        remove_offline_players = true,
+        create_force = true,
+        merge_forces = true,
+      },
+      LuaItemStack = {
+        build_blueprint = true,
+        set_stack = true,
+      },
+      LuaSurface = {
+        create_entity = true,
+        set_tiles = true,
+        clone_area = true,
+        clone_entities = true,
+        close_brush = true,
+        teleport = true,
+      },
+      LuaEntity = {
+        destroy = true,
+        die = true,
+        revive = true,
+        silent_revive = true,
+        clone = true,
+        mine = true,
+        connect_rolling_stock = true,
+        disconnect_rolling_stock = true,
+        set_driver = true,
+        set_passenger = true, --TODO: verify
+      },
+      LuaPlayer = {
+        toggle_map_editor = true,
+        mine_entity = true,
+        mine_tile = true,
+      },
+      LuaForce = {
+        set_friend = true,
+        set_cease_fire = true,
+        reset = true,
+      },
+      LuaEquipmentGrid = {
+        put = true,
+        take = true,
+        clear = true,
+      },
+      LuaInventory = {
+        resize = true,
+      },
+      LuaCustomChartTag = {
+        destroy = true,
+      }
+    },
+    __newindex = {
+      LuaEntity = {
+        driving = true,
+      },
+      LuaPlayer = {
+        opened = true,
+        driving = true,
+      },
+      LuaCustomChartTag = {
+        text = true, --TODO: verify
+      },
+      LuaSurface = {
+        name = true,
+      },
+      LuaTrain = {
+        schedule = true,
+        manual_mode = true,
+      },
+      --just catch any write to a LuaCustomTable, to cover mod settings
+      --all LuaCustomTable::__newindex use the same pointer-to-member userdata
+      --so we can't differentiate them from here.
+      LuaCustomTable = setmetatable({},{__index = function() return true end}),
+    }
+  }
+}
 
--- class data last updated factorio 1.0.0
+local function check_eventlike(level,hooktype)
+  local info = debug.getinfo(level,"nSf")
+  if not info then return end
+  if info.what ~= "C" then return end
+  local fname = info.name
+  local classes = eventlike.classes[fname]
+  if classes then
+    local _,t = debug.getlocal(level,1)
+    if type(t) ~= "table" or getmetatable(t) ~= "private" then return end
+    local tname = t.object_name
+    if not tname then return end
+    local class = classes[tname]
+    if not class then return end
+    local _,k = debug.getlocal(level,2)
+    local member = class[k]
+    if member then
+      if fname == "__index" then
+        if hooktype == "call" or hooktype == "tail call" then
+          -- there's no good way to get return values, so fetch it myself once in call instead
+          -- and get the userdata so we can compare things...
+          -- pcall in case it's a bad lookup
+          local success,func = pcall(function () return t[k] end)
+          if success and type(func)=="function" then
+            local _,memberptr = debug.getupvalue(func,2)
+            eventlike.members[memberptr] = {class=tname,member=k}
+            -- only need to do this once, so unhook it once we get one!
+            class[k] = nil
+            if not next(class) then
+              classes[tname] = nil
+            end
+          end
+        end
+        -- this call is not eventlike itself, but the returned func will be
+        return --false,tname,k
+      else -- __newindex
+        -- do the thing
+        return true,tname,k,(select(2,debug.getlocal(level,3)))
+      end
+    end
+  else
+    local f = info.func
+    local _,memberptr = debug.getupvalue(f,2)
+    if memberptr then
+      local member = eventlike.members[memberptr]
+      if member then
+        -- do the thing
+        return true,member.class,member.member
+      end
+    end
+  end
+end
+__DebugAdapter.stepIgnore(check_eventlike)
+
+
+
+-- class data last updated factorio 1.1.6
 return {
   alwaysValid = {
     LuaRemote = true,
@@ -38,7 +184,6 @@ return {
     LuaGameViewSettings = true,
   },
   noLongRefs = {
-    LuaProfiler = true,
     LuaCustomTable = true,
     LuaLazyLoadedValue = true,
     LuaMapSettings = true,
@@ -46,6 +191,8 @@ return {
     LuaDifficultySettings = true,
   },
   lineItem = luaObjectLines,
+  eventlike = eventlike,
+  check_eventlike = check_eventlike,
   expandKeys = {
     LuaAISettings = {
       allow_destroy_when_commands_fail = {},
@@ -54,7 +201,7 @@ return {
       path_resolution_modifier = {},
     },
     LuaAccumulatorControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       output_signal = {},
     },
@@ -74,7 +221,7 @@ return {
       bonus_gui_order = {readOnly = true},
     },
     LuaArithmeticCombinatorControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       signals_last_tick = {readOnly = true},
       parameters = {readOnly = true},
@@ -116,8 +263,37 @@ return {
     },
     LuaCircuitNetwork = {
       entity = {readOnly = true},
-      wire_type = {readOnly = true},
-      circuit_connector_id = {readOnly = true},
+      wire_type = {readOnly = true, enum = invert(defines.wire_type,"defines.wire_type.")},
+      circuit_connector_id = {readOnly = true, enum = (function()
+        local combinator = invert(defines.circuit_connector_id,"defines.circuit_connector_id.",function(k,v) return (not not string.match(k,"^combinator")) end)
+        local netnames = {
+          ["accumulator"] = {[defines.circuit_connector_id.accumulator] = "defines.circuit_connector_id.accumulator"},
+          ["container"] = {[defines.circuit_connector_id.container] = "defines.circuit_connector_id.container"},
+          ["logistic-container"] = {[defines.circuit_connector_id.container] = "defines.circuit_connector_id.container"},
+          ["programmable-speaker"] = {[defines.circuit_connector_id.programmable_speaker] = "defines.circuit_connector_id.programmable_speaker"},
+          ["rail-signal"] = {[defines.circuit_connector_id.rail_signal] = "defines.circuit_connector_id.rail_signal"},
+          ["rail-chain-signal"] = {[defines.circuit_connector_id.rail_chain_signal] = "defines.circuit_connector_id.rail_chain_signal"},
+          ["roboport"] = {[defines.circuit_connector_id.roboport] = "defines.circuit_connector_id.roboport"},
+          ["storage-tank"] = {[defines.circuit_connector_id.storage_tank] = "defines.circuit_connector_id.storage_tank"},
+          ["wall"] = {[defines.circuit_connector_id.wall] = "defines.circuit_connector_id.wall"},
+          ["electric-pole"] = {[defines.circuit_connector_id.electric_pole] = "defines.circuit_connector_id.electric_pole"},
+          ["inserter"] = {[defines.circuit_connector_id.inserter] = "defines.circuit_connector_id.inserter"},
+          ["lamp"] = {[defines.circuit_connector_id.lamp] = "defines.circuit_connector_id.lamp"},
+          ["pump"] = {[defines.circuit_connector_id.pump] = "defines.circuit_connector_id.pump"},
+          ["ofshore-pump"] = {[defines.circuit_connector_id.offshore_pump] = "defines.circuit_connector_id.ofshore_pump"},
+
+          ["constant-combinator"] = {[defines.circuit_connector_id.constant_combinator] = "defines.circuit_connector_id.constant_combinator"},
+
+          ["decider-combinator"] = combinator,
+          ["arithmetic-combinator"] = combinator,
+        }
+        return function(network,id)
+          local names = netnames[network.entity.type]
+          if names then
+            return names[id]
+          end
+        end
+      end)()},
       signals = {readOnly = true},
       network_id = {readOnly = true},
       connected_circuit_count = {readOnly = true},
@@ -127,14 +303,14 @@ return {
       game_commands = {readOnly = true},
     },
     LuaConstantCombinatorControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       parameters = {readOnly = true},
       enabled = {},
       signals_count = {readOnly = true},
     },
     LuaContainerControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
     },
     LuaCustomChartTag = {
@@ -165,7 +341,7 @@ return {
       hidden = {readOnly = true},
     },
     LuaDeciderCombinatorControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       signals_last_tick = {readOnly = true},
       parameters = {readOnly = true},
@@ -204,6 +380,7 @@ return {
       selected = {},
       opened = {},
       crafting_queue_size = {readOnly = true},
+      crafting_queue_progress = {readOnly = true},
       walking_state = {},
       riding_state = {},
       mining_state = {},
@@ -230,10 +407,9 @@ return {
       character_trash_slot_count_bonus = {},
       character_maximum_following_robot_count_bonus = {},
       character_health_bonus = {},
-      character_logistic_slot_count = {},
       character_personal_logistic_requests_enabled = {},
-      auto_trash_filters = {},
-      opened_gui_type = {readOnly = true},
+      vehicle_logistic_requests_enabled = {},
+      opened_gui_type = {readOnly = true, enum = invert(defines.gui_type,"defines.gui_type.")},
       build_distance = {readOnly = true},
       drop_item_distance = {readOnly = true},
       reach_distance = {readOnly = true},
@@ -258,7 +434,7 @@ return {
       rotatable = {},
       operable = {},
       health = {},
-      direction = {},
+      direction = {enum = invert(defines.direction,"defines.direction.")},
       supports_direction = {readOnly = true},
       orientation = {},
       cliff_orientation = {readOnly = true},
@@ -292,8 +468,8 @@ return {
       time_to_live = {},
       color = {},
       text = {},
-      signal_state = {readOnly = true},
-      chain_signal_state = {readOnly = true},
+      signal_state = {readOnly = true, enum = invert(defines.signal_state,"defines.signal_state.")},
+      chain_signal_state = {readOnly = true, enum = invert(defines.chain_signal_state,"defines.chain_signal_state.")},
       to_be_looted = {},
       crafting_speed = {readOnly = true},
       crafting_progress = {},
@@ -340,6 +516,8 @@ return {
       tree_color_index_max = {readOnly = true},
       tree_stage_index = {},
       tree_stage_index_max = {readOnly = true},
+      tree_gray_stage_index = {},
+      tree_gray_stage_index_max = {readOnly = true},
       burner = {readOnly = true},
       shooting_target = {},
       proxy_target = {readOnly = true},
@@ -376,7 +554,7 @@ return {
       ai_settings = {readOnly = true},
       highlight_box_type = {},
       highlight_box_blink_interval = {},
-      status = {readOnly = true},
+      status = {readOnly = true, enum = invert(defines.entity_status,"defines.entity_status.")},
       enable_logistics_while_moving = {},
       render_player = {},
       render_to_forces = {},
@@ -395,9 +573,18 @@ return {
       distraction_command = {readOnly = true},
       time_to_next_effect = {},
       autopilot_destination = {},
+      autopilot_destinations = {readOnly = true},
+      trains_count = {readOnly = true},
+      trains_limit = {},
       is_entity_with_force = {readOnly = true},
       is_entity_with_owner = {readOnly = true},
       is_entity_with_health = {readOnly = true},
+      combat_robot_owner = {},
+      link_id = {},
+      follow_target = {},
+      follow_offset = {},
+      linked_belt_type = {},
+      linked_belt_neighbour = {readOnly = true},
     },
     LuaEntityPrototype = {
       name = {readOnly = true},
@@ -420,6 +607,7 @@ return {
       sticker_box = {readOnly = true},
       collision_mask = {readOnly = true},
       collision_mask_with_flags = {readOnly = true},
+      default_collision_mask_with_flags = {readOnly = true},
       order = {readOnly = true},
       group = {readOnly = true},
       subgroup = {readOnly = true},
@@ -469,6 +657,7 @@ return {
       max_circuit_wire_distance = {readOnly = true},
       energy_usage = {readOnly = true},
       max_energy_usage = {readOnly = true},
+      max_energy_production = {readOnly = true},
       effectivity = {readOnly = true},
       consumption = {readOnly = true},
       friction_force = {readOnly = true},
@@ -505,7 +694,6 @@ return {
       inserter_rotation_speed = {readOnly = true},
       count_as_rock_for_filtered_deconstruction = {readOnly = true},
       filter_count = {readOnly = true},
-      production = {readOnly = true},
       time_to_live = {readOnly = true},
       distribution_effectivity = {readOnly = true},
       explosion_beam = {readOnly = true},
@@ -519,6 +707,14 @@ return {
       collision_mask_considers_tile_transitions = {readOnly = true},
       allowed_effects = {readOnly = true},
       rocket_parts_required = {readOnly = true},
+      rocket_rising_delay = {readOnly = true},
+      launch_wait_time = {readOnly = true},
+      light_blinking_speed = {readOnly = true},
+      door_opening_speed = {readOnly = true},
+      rising_speed = {readOnly = true},
+      engine_starting_speed = {readOnly = true},
+      flying_speed = {readOnly = true},
+      flying_acceleration = {readOnly = true},
       fixed_recipe = {readOnly = true},
       construction_radius = {readOnly = true},
       logistic_radius = {readOnly = true},
@@ -566,6 +762,7 @@ return {
       allow_access_to_all_forces = {readOnly = true},
       supports_direction = {readOnly = true},
       terrain_friction_modifier = {readOnly = true},
+      allow_passengers = {readOnly = true},
       max_distance_of_sector_revealed = {readOnly = true},
       max_distance_of_nearby_sector_revealed = {readOnly = true},
       adjacent_tile_collision_box = {readOnly = true},
@@ -752,7 +949,6 @@ return {
       character_health_bonus = {},
       max_successful_attempts_per_tick_per_construction_queue = {},
       max_failed_attempts_per_tick_per_construction_queue = {},
-      auto_character_trash_slots = {},
       zoom_to_world_enabled = {},
       zoom_to_world_ghost_building_enabled = {},
       zoom_to_world_blueprint_enabled = {},
@@ -785,7 +981,7 @@ return {
       players = {readOnly = true},
       map_settings = {readOnly = true},
       difficulty_settings = {readOnly = true},
-      difficulty = {readOnly = true},
+      difficulty = {readOnly = true, enum = invert(defines.difficulty,"defines.difficulty.")},
       forces = {readOnly = true},
       entity_prototypes = {readOnly = true},
       item_prototypes = {readOnly = true},
@@ -815,6 +1011,7 @@ return {
       trivial_smoke_prototypes = {readOnly = true},
       shortcut_prototypes = {readOnly = true},
       recipe_category_prototypes = {readOnly = true},
+      map_gen_presets = {readOnly = true},
       styles = {readOnly = true},
       tick = {readOnly = true},
       ticks_played = {readOnly = true},
@@ -856,7 +1053,7 @@ return {
       show_shortcut_bar = {},
     },
     LuaGenericOnOffControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
@@ -880,12 +1077,13 @@ return {
       center = {readOnly = true},
       goal = {readOnly = true},
       screen = {readOnly = true},
+      relative = {readOnly = true},
     },
     LuaGuiElement = {
       index = {readOnly = true},
       gui = {readOnly = true},
       parent = {readOnly = true},
-      name = {readOnly = true},
+      name = {},
       caption = {},
       value = {},
       direction = {readOnly = true},
@@ -942,6 +1140,8 @@ return {
       selected_tab_index = {},
       tabs = {readOnly = true},
       entity = {},
+      anchor = {},
+      tags = {},
       switch_state = {},
       allow_none_state = {},
       left_label_caption = {},
@@ -950,15 +1150,15 @@ return {
       right_label_tooltip = {},
     },
     LuaInserterControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
       logistic_condition = {},
       connect_to_logistic_network = {},
       circuit_read_hand_contents = {},
-      circuit_mode_of_operation = {},
-      circuit_hand_read_mode = {},
+      circuit_mode_of_operation = {enum = invert(defines.control_behavior.inserter.circuit_mode_of_operation,"defines.control_behavior.inserter.circuit_mode_of_operation.")},
+      circuit_hand_read_mode = {enum = invert(defines.control_behavior.inserter.hand_read_mode,"defines.control_behavior.inserter.hand_read_mode.")},
       circuit_set_stack_size = {},
       circuit_stack_control_signal = {},
     },
@@ -976,7 +1176,90 @@ return {
       connections = {readOnly = true},
     },
     LuaInventory = {
-      index = {readOnly = true},
+      index = {readOnly = true, enum =(function()
+        local burner = {
+          [defines.inventory.fuel] = "defines.inventory.fuel",
+          [defines.inventory.burnt_result] = "defines.inventory.burnt_result",
+        }
+        local function with(super,t) return setmetatable(t,{__index = super}) end
+
+        local chest = {
+          [defines.inventory.chest] = "defines.inventory.chest",
+        }
+
+        local assembler = with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^assembling_machine_") end))
+
+        local character = invert(defines.inventory,"defines.inventory.",function(k,v) return (not not string.match(k,"^character_")) and k ~= "character_corpse" end)
+        local robot = invert(defines.inventory,"defines.inventory.",function(k,v) return (not not string.match(k,"^robot_")) end)
+
+        local invname = {
+          burner = burner,
+          item = invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^item_") end),
+          player = {
+            [defines.controllers.character] = character,
+            [defines.controllers.god] =
+              invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^god_") end),
+            [defines.controllers.editor] =
+              invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^editor_") end),
+          },
+          entity = {
+            ["container"]=chest,
+            ["logistic-container"]=chest,
+            ["cargo-wagon"]={ [defines.inventory.cargo_wagon] = "defines.inventory.cargo_wagon" },
+            ["rocket-silo-rocket"]={ [defines.inventory.cargo_wagon] = "defines.inventory.rocket" },
+
+            ["construction-robot"]=robot,
+            ["logistic-robot"]=robot,
+
+            ["ammo-turret"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^turret_") end),
+            ["artillery-turret"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^artillery_turret_") end),
+            ["artillery-wagon"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^artillery_turret_") end),
+            ["roboport"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^roboport_") end),
+            ["beacon"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^beacon_") end),
+            ["character-corpse"]=invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^character_corpse_") end),
+
+            ["furnace"]=with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^furnace_") end)),
+            ["assembling-machine"]=assembler,
+            ["mining-drill"]=with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^mining_drill_") end)),
+            ["lab"]=with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^lab_") end)),
+            ["car"]=with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^car_") end)),
+            ["spider-vehicle"]=with(burner,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^spider_") end)),
+            ["rocket-silo"]=with(assembler,invert(defines.inventory,"defines.inventory.",function(k,v) return not not string.match(k,"^rocket_silo_") end)),
+
+          },
+        }
+        return function(inv,index)
+          local owner = inv.player_owner
+          if owner then
+            -- check if player is character/god/editor
+            local names = invname.player[owner.controller_type]
+            if names then
+              return names[index]
+            end
+            return
+          end
+          owner = inv.equipment_owner
+          if owner then
+            -- burner inside equipment
+            return invname.burner[index]
+          end
+          owner = inv.entity_owner
+          if owner then
+            -- check entity type
+            local names = invname.entity[owner.type]
+            if names then
+              return names[index]
+            end
+            return
+          end
+          owner = inv.mod_owner
+          if owner then
+            return nil
+          end
+          local names = invname.item
+          return names[index]
+        end
+      end)()},
       entity_owner = {readOnly = true},
       player_owner = {readOnly = true},
       equipment_owner = {readOnly = true},
@@ -1066,7 +1349,10 @@ return {
       health = {},
       durability = {},
       ammo = {},
-      -- blueprint_icons = {}, -- crashes when read on wrong items in Factorio 1.0.0
+      blueprint_icons = {},
+      blueprint_snap_to_grid = {},
+      blueprint_position_relative_to_grid = {},
+      blueprint_absolute_snapping = {},
       label = {},
       label_color = {},
       allow_manual_label_change = {},
@@ -1078,9 +1364,9 @@ return {
       custom_description = {},
       entity_filters = {},
       tile_filters = {},
-      entity_filter_mode = {},
-      tile_filter_mode = {},
-      tile_selection_mode = {},
+      entity_filter_mode = {enum = invert(defines.deconstruction_item.entity_filter_mode,"defines.deconstruction_item.entity_filter_mode.")},
+      tile_filter_mode = {enum = invert(defines.deconstruction_item.tile_filter_mode,"defines.deconstruction_item.tile_filter_mode.")},
+      tile_selection_mode = {enum = invert(defines.deconstruction_item.tile_selection_mode,"defines.deconstruction_item.tile_selection_mode.")},
       trees_and_rocks_only = {},
       entity_filter_count = {readOnly = true},
       tile_filter_count = {readOnly = true},
@@ -1103,7 +1389,7 @@ return {
       is_upgrade_item = {readOnly = true},
     },
     LuaLampControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
@@ -1130,9 +1416,9 @@ return {
       to_charge_robots = {readOnly = true},
     },
     LuaLogisticContainerControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
-      circuit_mode_of_operation = {},
+      circuit_mode_of_operation = {enum = invert(defines.control_behavior.logistic_container.circuit_mode_of_operation,"defines.control_behavior.logistic_container.circuit_mode_of_operation.")},
     },
     LuaLogisticNetwork = {
       force = {readOnly = true},
@@ -1162,7 +1448,7 @@ return {
       logistic_network = {readOnly = true},
       logistic_member_index = {readOnly = true},
       filters = {readOnly = true},
-      mode = {readOnly = true},
+      mode = {readOnly = true, enum = invert(defines.logistic_mode,"defines.logistic_mode.")},
       force = {readOnly = true},
       targeted_items_pickup = {readOnly = true},
       targeted_items_deliver = {readOnly = true},
@@ -1277,7 +1563,7 @@ return {
     },
 
     LuaMiningDrillControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
@@ -1285,7 +1571,7 @@ return {
       connect_to_logistic_network = {},
       circuit_enable_disable = {},
       circuit_read_resources = {},
-      resource_read_mode = {},
+      resource_read_mode = {enum = invert(defines.control_behavior.mining_drill.resource_read_mode,"defines.control_behavior.mining_drill.resource_read_mode.")},
       resource_read_targets = {readOnly = true},
     },
     LuaModSettingPrototype = {
@@ -1354,6 +1640,7 @@ return {
       selected = {},
       opened = {},
       crafting_queue_size = {readOnly = true},
+      crafting_queue_progress = {readOnly = true},
       walking_state = {},
       riding_state = {},
       mining_state = {},
@@ -1380,10 +1667,9 @@ return {
       character_trash_slot_count_bonus = {},
       character_maximum_following_robot_count_bonus = {},
       character_health_bonus = {},
-      character_logistic_slot_count = {},
       character_personal_logistic_requests_enabled = {},
-      auto_trash_filters = {},
-      opened_gui_type = {readOnly = true},
+      vehicle_logistic_requests_enabled = {},
+      opened_gui_type = {readOnly = true, enum = invert(defines.gui_type,"defines.gui_type.")},
       build_distance = {readOnly = true},
       drop_item_distance = {readOnly = true},
       reach_distance = {readOnly = true},
@@ -1394,11 +1680,12 @@ return {
       character_running_speed = {readOnly = true},
       character_mining_progress = {readOnly = true},
       character = {},
+      cutscene_character = {readOnly = true},
       index = {readOnly = true},
       gui = {readOnly = true},
       opened_self = {readOnly = true},
-      controller_type = {readOnly = true},
-      stashed_controller_type = {readOnly = true},
+      controller_type = {readOnly = true, enum = invert(defines.controllers,"defines.controllers.")},
+      stashed_controller_type = {readOnly = true, enum = invert(defines.controllers,"defines.controllers.")},
       game_view_settings = {},
       minimap_enabled = {},
       color = {},
@@ -1417,7 +1704,7 @@ return {
       display_resolution = {readOnly = true},
       display_scale = {readOnly = true},
       blueprint_to_setup = {readOnly = true},
-      render_mode = {readOnly = true},
+      render_mode = {readOnly = true, enum = invert(defines.render_mode,"defines.render_mode.")},
       spectator = {},
       remove_unfiltered_items = {},
       infinity_inventory_filters = {},
@@ -1428,13 +1715,13 @@ return {
       ["<translated>"] = {thisTranslated = true},
     },
     LuaProgrammableSpeakerControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       circuit_parameters = {},
       circuit_condition = {},
     },
     LuaRailChainSignalControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       red_signal = {},
       orange_signal = {},
@@ -1449,7 +1736,7 @@ return {
       rails = {readOnly = true},
     },
     LuaRailSignalControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       red_signal = {},
       orange_signal = {},
@@ -1518,7 +1805,7 @@ return {
       localised_description = {readOnly = true},
     },
     LuaRoboportControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       read_logistics = {},
       read_robot_stats = {},
@@ -1538,13 +1825,13 @@ return {
       localised_name = {readOnly = true},
       localised_description = {readOnly = true},
       action = {readOnly = true},
-      item_to_create = {readOnly = true},
+      item_to_spawn = {readOnly = true},
       technology_to_unlock = {readOnly = true},
       toggleable = {readOnly = true},
       associated_control_input = {readOnly = true},
     },
     LuaStorageTankControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
     },
     LuaStyle = {
@@ -1576,7 +1863,7 @@ return {
       vertically_stretchable = {},
       horizontally_squashable = {},
       vertically_squashable = {},
-      rich_text_setting = {},
+      rich_text_setting = {enum = invert(defines.rich_text_setting,"defines.rich_text_setting.")},
       hovered_font_color = {},
       clicked_font_color = {},
       disabled_font_color = {},
@@ -1656,6 +1943,7 @@ return {
       enabled = {readOnly = true},
       hidden = {readOnly = true},
       visible_when_disabled = {readOnly = true},
+      ignore_tech_cost_multiplier = {readOnly = true},
       upgrade = {readOnly = true},
       prerequisites = {readOnly = true},
       research_unit_ingredients = {readOnly = true},
@@ -1707,11 +1995,11 @@ return {
       cargo_wagons = {readOnly = true},
       fluid_wagons = {readOnly = true},
       schedule = {},
-      state = {readOnly = true},
+      state = {readOnly = true, enum = invert(defines.train_state,"defines.train_state.")},
       front_rail = {readOnly = true},
       back_rail = {readOnly = true},
-      rail_direction_from_front_rail = {readOnly = true},
-      rail_direction_from_back_rail = {readOnly = true},
+      rail_direction_from_front_rail = {readOnly = true, enum = invert(defines.rail_direction,"defines.rail_direction.")},
+      rail_direction_from_back_rail = {readOnly = true, enum = invert(defines.rail_direction,"defines.rail_direction.")},
       front_stock = {readOnly = true},
       back_stock = {readOnly = true},
       station = {readOnly = true},
@@ -1727,7 +2015,7 @@ return {
       signal = {readOnly = true},
     },
     LuaTrainStopControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
@@ -1736,11 +2024,15 @@ return {
       send_to_train = {},
       read_from_train = {},
       read_stopped_train = {},
+      set_trains_limit = {},
+      read_trains_count = {},
       enable_disable = {},
       stopped_train_signal = {},
+      trains_count_signal = {},
+      trains_limit_signal = {},
     },
     LuaTransportBeltControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       disabled = {readOnly = true},
       circuit_condition = {},
@@ -1748,7 +2040,7 @@ return {
       connect_to_logistic_network = {},
       enable_disable = {},
       read_contents = {},
-      read_contents_mode = {},
+      read_contents_mode = {enum = invert(defines.control_behavior.transport_belt.content_read_mode,"defines.control_behavior.transport_belt.content_read_mode.")},
     },
     LuaTransportLine = {
       owner = {readOnly = true},
@@ -1779,7 +2071,7 @@ return {
     LuaUnitGroup = {
       members = {readOnly = true},
       position = {readOnly = true},
-      state = {readOnly = true},
+      state = {readOnly = true, enum = invert(defines.group_state,"defines.group_state.")},
       force = {readOnly = true},
       surface = {readOnly = true},
       group_number = {readOnly = true},
@@ -1801,7 +2093,7 @@ return {
       render_no_power_icon = {readOnly = true},
     },
     LuaWallControlBehavior = {
-      type = {readOnly = true},
+      type = {readOnly = true, enum = invert(defines.control_behavior.type,"defines.control_behavior.type.")},
       entity = {readOnly = true},
       circuit_condition = {},
       open_gate = {},

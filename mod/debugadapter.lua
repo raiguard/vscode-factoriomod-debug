@@ -22,6 +22,7 @@ local require = require
 --this has to be first before requiring other files so they can mark functions as ignored
 require("__debugadapter__/stepping.lua")
 
+require("__debugadapter__/luaobjectinfo.lua") -- uses pcall
 local variables = require("__debugadapter__/variables.lua") -- uses pcall
 local normalizeLuaSource = require("__debugadapter__/normalizeLuaSource.lua")
 local remotestepping
@@ -36,17 +37,33 @@ end
 require("__debugadapter__/print.lua") -- uses evaluate/variables
 require("__debugadapter__/entrypoints.lua") -- must be after anyone using pcall/xpcall
 
+require("__debugadapter__/stacks.lua")
 
 local script = script
 local debug = debug
 local print = print
 local pairs = pairs
 
+
+local sourcelabel = {
+  remote = function(mod_name) return mod_name and ("remote.call from "..mod_name) or "remote.call context switch" end,
+  unknown = function(mod_name) return "unknown entry point" end,
+  raise_event = function(mod_name) return "raise_event from "..mod_name end,
+  api = function(mod_name,extra) return (extra or "api call").." raised event from "..mod_name end,
+}
+
+local function labelframe(i,sourcename,mod_name,extra)
+  return {
+    id = i,
+    name = (sourcelabel[sourcename] or function(mod_name) return "unkown from "..mod_name end)(mod_name,extra),
+    presentationHint = "label",
+  }
+end
+
 ---@param startFrame integer | nil
----@param levels integer | nil
 ---@param forRemote boolean | nil
 ---@return StackFrame[]
-function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
+function __DebugAdapter.stackTrace(startFrame, forRemote,seq)
   local offset = 5 -- 0 getinfo, 1 stackTrace, 2 debug command, 3 debug.debug, 4 sethook callback, 5 at breakpoint
   -- in exceptions    0 getinfo, 1 stackTrace, 2 debug command, 3 debug.debug, 4 xpcall callback, 5 at exception
   -- in instrument ex 0 getinfo, 1 stackTrace, 2 debug command, 3 debug.debug, 4 on_error callback,
@@ -57,13 +74,25 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
   end
   local i = (startFrame or 0) + offset
   local stackFrames = {}
-  local stackIsTrucated = false
   while true do
     local info = debug.getinfo(i,"nSlutf")
     if not info then break end
     local framename = info.name or "(name unavailable)"
     if info.what == "main" then
       framename = "(main chunk)"
+    end
+    local isC = info.what == "C"
+    if isC then
+      if info.name == "__index" or info.name == "__newindex" then
+        local t = __DebugAdapter.describe(select(2,debug.getlocal(i,1)),true)
+        local k = __DebugAdapter.describe(select(2,debug.getlocal(i,2)),true)
+        if info.name == "__newindex" then
+          local v = __DebugAdapter.describe(select(2,debug.getlocal(i,3)),true)
+          framename = ("__newindex(%s,%s,%s)"):format(t,k,v)
+        else
+          framename = ("__index(%s,%s)"):format(t,k)
+        end
+      end
     end
     if info.istailcall then
       framename = ("[tail calls...] %s"):format(framename)
@@ -72,7 +101,6 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
       framename = ("[%s] %s"):format(script.mod_name, framename)
     end
     local source = normalizeLuaSource(info.source)
-    local isC = info.what == "C"
     local noSource = isC or (source:sub(1,1) == "=")
     local stackFrame = {
       id = i,
@@ -93,12 +121,6 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
     end
     stackFrames[#stackFrames+1] = stackFrame
     i = i + 1
-    if #stackFrames == levels then
-      if debug.getinfo(i,"f") then
-        stackIsTrucated = true
-      end
-      break
-    end
   end
 
   if script then
@@ -106,55 +128,52 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
     -- possible entry points (in control stage):
     --   main chunks (identified above as "(main chunk)", call sethook tags as entrypoint="main", no break on exception)
     --     control.lua init and any files it requires
-    --     dostring(globaldump) for loading global from save
     --     migrations
     --     /c __modname__ command
-    --   serpent.dump(global,{numformat="%a"}) for saving/crc check (call sethook tags as entrypoint="saving", no break on exception)
+    --     simulation scripts (as commands)
     --   remote.call
-    --     from debug enabled mod (instrumented+2, entrypoint="hookedremote")
+    --     from debug enabled mod (instrumented+1/2, entrypoint="hookedremote")
     --     from non-debug enabled mod (call sethook tags as entrypoint="remote fname", no break on exception)
-    --   event handlers (instrumented+2)
+    --   event handlers (instrumented+1/2)
     --     if called by raise_event, has event.mod_name
-    --       from a debug enabled mod, has event.__debug = {stack = ...}
-    --   /command handlers (instrumented+2)
-    --   special events: (instrumented+2)
+    --   /command handlers (instrumented+1/2)
+    --   special events: (instrumented+1/2)
     --     on_init, on_load, on_configuration_changed, on_nth_tick
+
+    -- but first, drop frames from same-stack api calls that raise events
+    local stacks = __DebugAdapter.peekStacks()
+    do
+      local dropextra = {
+        remote = 3, -- remotestepping.call, remote.call, remotestepping.callinner
+        api = 2, -- __newindex or api closure, try in raised event
+      } -- default = 1 -- try in raised event or command
+      local dropcount = 0
+      for istack = #stacks,1,-1 do
+        local stack = stacks[istack]
+        if stack.mod_name == script.mod_name then
+          dropcount = dropcount + table_size(stack.stack) + (dropextra[stack.source] or 1)
+        end
+      end
+      if dropcount > 0 then
+        for drop = 1,dropcount,1 do
+          stackFrames[#stackFrames] = nil
+        end
+      end
+    end
 
     local entrypoint = __DebugAdapter.getEntryPointName()
     if entrypoint then
       -- check for non-instrumented entry...
       if entrypoint == "unknown" then
-        local stackFrame = {
-          id = i,
-          name = "unknown entry point",
-          presentationHint = "label",
-          line = 0,
-          column = 0,
-          source = {
-            name = "unknown",
-            presentationHint = "deemphasize",
-          }
-        }
-        stackFrames[#stackFrames+1] = stackFrame
+        stackFrames[#stackFrames+1] = labelframe(i,"unknown")
         i = i + 1
       elseif entrypoint == "saving" or entrypoint == "main" then
         -- nothing useful to add for these...
       elseif entrypoint:match("^remote ") then
         stackFrames[#stackFrames].name = entrypoint:match("^remote (.+)$")
-        local stackFrame = {
-          id = i,
-          name = "remote.call context switch",
-          presentationHint = "label",
-          line = 0,
-          column = 0,
-          source = {
-            name = "remote",
-            presentationHint = "deemphasize",
-          }
-        }
-        stackFrames[#stackFrames+1] = stackFrame
+        stackFrames[#stackFrames+1] = labelframe(i,"remote")
         i = i + 1
-      elseif not stackIsTrucated then
+      else
         -- instrumented event/remote handler has one or two extra frames.
         -- Delete them and rename the next bottom frame...
         -- this leaves a gap in `i`. Maybe later allow expanding hidden frames?
@@ -169,51 +188,11 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
 
         local framename = entrypoint
         if entrypoint == "hookedremote" then
-          local remoteStack,remoteFName = remotestepping.parentState()
+          local remoteFName = remotestepping.parentState()
           framename = remoteFName
-          local stackFrame = {
-            id = i,
-            name = "remote.call context switch",
-            presentationHint = "label",
-            line = 0,
-            column = 0,
-            source = {
-              name = "remote",
-              presentationHint = "deemphasize",
-            }
-          }
-          stackFrames[#stackFrames+1] = stackFrame
-          i = i + 1
-          for _,frame in pairs(remoteStack) do
-            frame.id = i
-            stackFrames[#stackFrames+1] = frame
-            i = i + 1
-          end
+
         elseif entrypoint:match(" handler$") then
-          local _,event = debug.getlocal(lastframe.id,1)
-          if type(event) == "table" and event.mod_name then
-            local stackFrame = {
-              id = i,
-              name = "raise_event from " .. event.mod_name,
-              presentationHint = "label",
-              line = 0,
-              column = 0,
-              source = {
-                name = "raise_event",
-                presentationHint = "deemphasize",
-              }
-            }
-            stackFrames[#stackFrames+1] = stackFrame
-            i = i + 1
-            if event.__debug then
-              -- debug enabled mods provide a stack
-              for _,frame in pairs(event.__debug.stack) do
-                frame.id = i
-                stackFrames[#stackFrames+1] = frame
-                i = i + 1
-              end
-            end
-          end
+
         end
         if forRemote then
           framename = ("[%s] %s"):format(script.mod_name, framename)
@@ -221,11 +200,27 @@ function __DebugAdapter.stackTrace(startFrame, levels, forRemote)
         if not info.istailcall then
           lastframe.name = framename
         end
+
+        -- list any eventlike api calls stacked up...
+        if not forRemote and stacks then
+          local nstacks = #stacks
+          for istack = nstacks,1,-1 do
+            local stack = stacks[istack]
+            --print("stack",istack,nstacks,stack.mod_name,script.mod_name)
+            stackFrames[#stackFrames+1] = labelframe(i,stack.source,stack.mod_name,stack.extra)
+            i = i + 1
+            for _,frame in pairs(stack.stack) do
+              frame.id = i
+              stackFrames[#stackFrames+1] = frame
+              i = i + 1
+            end
+          end
+        end
       end
     end
   end
   if not forRemote then
-    print("DBGstack: " .. json.encode(stackFrames))
+    print("DBGstack: " .. json.encode{frames=stackFrames,seq=seq})
   end
   return stackFrames
 end

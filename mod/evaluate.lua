@@ -29,6 +29,7 @@ local function evalmeta(frameId,alsoLookIn)
   local getupvalue = debug.getupvalue
   local env = _ENV
   local em = {
+    __debugtype = "DebugAdapter.EvalEnv",
     __debugline = function(t,short)
       if short then
         return "<Eval Env>"
@@ -86,14 +87,18 @@ local function evalmeta(frameId,alsoLookIn)
           local frame = frameId + offset
           --check for local at frameId
           i = 1
+          local islocal,localvalue
           while true do
             local name,value = getlocal(frame,i)
             if not name then break end
             if name:sub(1,1) ~= "(" then
-              if name == k then return value end
+              if name == k then
+                islocal,localvalue = true,value
+              end
             end
             i = i + 1
           end
+          if islocal then return localvalue end
 
           --check for upvalue at frameId
           local func = getinfo(frame,"f").func
@@ -152,16 +157,20 @@ local function evalmeta(frameId,alsoLookIn)
           local frame = frameId + offset
           --check for local at frameId
           i = 1
+          local localindex
           while true do
             local name = getlocal(frame,i)
             if not name then break end
             if name:sub(1,1) ~= "(" then
               if name == k then
-                debug.setlocal(frame,i,v)
-                return
+                localindex = i
               end
             end
             i = i + 1
+          end
+          if localindex then
+            debug.setlocal(frame,localindex,v)
+            return
           end
 
           --check for upvalue at frameId
@@ -262,19 +271,22 @@ end
 ---@param context string
 ---@param expression string
 ---@param seq number
-function __DebugAdapter.evaluate(frameId,context,expression,seq)
+function __DebugAdapter.evaluate(frameId,context,expression,seq,formod)
   -- if you manage to do one of these fast enough for data, go for it...
-  if not frameId and not data then
+  if not data and formod~=script.mod_name then
     local modname,rest = expression:match("^__(.-)__ (.+)$")
     if modname then
       expression = rest
+      frameId = nil
     else
-      modname = "level"
+      if not frameId then
+        modname = "level"
+      end
     end
-    if script.mod_name~=modname then
+    if modname and modname~=script.mod_name then
       -- remote to named state if possible, else just error
       if __DebugAdapter.canRemoteCall() and remote.interfaces["__debugadapter_"..modname] then
-        return remote.call("__debugadapter_"..modname,"evaluate",frameId,context,expression,seq)
+        return remote.call("__debugadapter_"..modname,"evaluate",frameId,context,expression,seq,modname)
       else
         print("DBGeval: " .. json.encode({result = "`"..modname.."` not available for eval", type="error", variablesReference=0, seq=seq}))
         return

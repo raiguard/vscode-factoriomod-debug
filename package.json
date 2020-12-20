@@ -1,7 +1,7 @@
 {
   "name": "factoriomod-debug",
   "displayName": "Factorio Mod Debug",
-  "version": "0.18.38",
+  "version": "1.1.2",
   "publisher": "justarandomgeek",
   "description": "Debug Tools for developing Factorio Mods",
   "author": {
@@ -13,7 +13,7 @@
     "multi-root ready"
   ],
   "engines": {
-    "vscode": "^1.48.0"
+    "vscode": "^1.52.0"
   },
   "icon": "images/factoriomod-debug-icon.png",
   "categories": [
@@ -39,36 +39,45 @@
     "publish": "vsce publish"
   },
   "dependencies": {
-    "archiver": "^3.1.1",
-    "d3": "^5.16.0",
+    "archiver": "^5.1.0",
+    "d3": "^6.3.1",
     "d3-flame-graph": "^3.1.1",
-    "ini": "^1.3.5",
-    "semver": "^7.3.2",
+    "ini": "^1.3.8",
+    "semver": "^7.3.4",
     "tree-kill": "^1.2.2",
-    "vscode-debugadapter": "^1.41.1",
+    "vscode-debugadapter": "^1.43.0",
     "web-request": "^1.0.7"
   },
   "devDependencies": {
+    "@types/archiver": "^3.1.1",
     "@types/buffers": "^0.1.31",
     "@types/ini": "^1.3.30",
-    "@types/node": "^14.6.4",
+    "@types/node": "^14.14.14",
     "@types/request": "^2.48.5",
-    "@types/semver": "^7.3.3",
-    "@types/vscode": "^1.48.0",
-    "@typescript-eslint/eslint-plugin": "^2.34.0",
-    "@typescript-eslint/parser": "^2.34.0",
-    "eslint": "^6.8.0",
-    "typescript": "3.8.3",
-    "vsce": "^1.79.5",
-    "vscode-debugadapter-testsupport": "^1.41.0"
+    "@types/semver": "^7.3.4",
+    "@types/vscode": "^1.52.0",
+    "@typescript-eslint/eslint-plugin": "^4.10.0",
+    "@typescript-eslint/parser": "^4.10.0",
+    "eslint": "^7.16.0",
+    "typescript": "^4.1.3",
+    "vsce": "^1.83.0",
+    "vscode-debugadapter-testsupport": "^1.43.0"
   },
   "main": "./out/extension",
   "activationEvents": [
     "onDebug",
     "onCommand:workbench.action.tasks.runTask",
+    "onCommand:factorio.openchangelog",
+    "onCommand:factorio.compile",
+    "onCommand:factorio.datestamp",
+    "onCommand:factorio.package",
+    "onCommand:factorio.version",
+    "onCommand:factorio.upload",
+    "onCommand:factorio.publish",
     "workspaceContains:**/changelog.txt",
     "workspaceContains:**/info.json",
     "onLanguage:factorio-locale",
+    "onLanguage:factorio-changelog",
     "onView:factoriomods"
   ],
   "contributes": {
@@ -98,11 +107,13 @@
         "properties": {
           "factorio.portal.username": {
             "type": "string",
-            "description": "Username for Factorio Mod Portal to enable automatically uploading mods. If not set, will use environment variable FACTORIO_PORTAL_USERNAME if set, or prompt for a username."
+            "description": "Username for Factorio Mod Portal to enable automatically uploading mods. If not set, will use environment variable FACTORIO_PORTAL_USERNAME if set, or prompt for a username.",
+            "scope": "machine-overridable"
           },
           "factorio.portal.password": {
             "type": "string",
-            "description": "Password for Factorio Mod Portal to enable automatically uploading mods. If not set, will use environment variable FACTORIO_PORTAL_PASSWORD if set, or prompt for a password."
+            "description": "Password for Factorio Mod Portal to enable automatically uploading mods. If not set, will use environment variable FACTORIO_PORTAL_PASSWORD if set, or prompt for a password.",
+            "scope": "machine-overridable"
           },
           "factorio.package.preparingCommitMessage": {
             "type": "string",
@@ -153,6 +164,11 @@
           "factorio.package.removeZipAfterPublish": {
             "type": "boolean",
             "description": "Remove mod zip after successful upload in Publish task",
+            "default": false
+          },
+          "factorio.debug.expandablePrint": {
+            "type": "boolean",
+            "description": "Make expandable log items from `__DebugAdapter.print({...})`.",
             "default": false
           },
           "factorio.profile.timerHighlightColor": {
@@ -256,12 +272,19 @@
     "taskDefinitions": [
       {
         "type": "factorio",
-        "required": ["command"],
+        "required": [
+          "command"
+        ],
         "properties": {
           "command": {
             "type": "string",
             "enum": [
-              "datestamp","package","version","upload","publish","compile",
+              "datestamp",
+              "package",
+              "version",
+              "upload",
+              "publish",
+              "compile",
               "adjustMods"
             ]
           },
@@ -295,6 +318,17 @@
       }
     ],
     "commands": [
+      {
+        "command": "factorio.openchangelog",
+        "category": "Factorio",
+        "title": "Open Changelog",
+        "icon": "$(versions)"
+      },
+      {
+        "command": "factorio.compile",
+        "category": "Factorio",
+        "title": "Compile"
+      },
       {
         "command": "factorio.datestamp",
         "category": "Factorio",
@@ -339,6 +373,14 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "factorio.openchangelog",
+          "when": "false"
+        },
+        {
+          "command": "factorio.compile",
+          "when": "false"
+        },
+        {
           "command": "factorio.datestamp",
           "when": "false"
         },
@@ -361,54 +403,69 @@
       ],
       "view/item/context": [
         {
+          "command": "factorio.openchangelog",
+          "when": "view == factoriomods && viewItem =~ /haschangelog/",
+          "group": "1_info@1"
+        },
+        {
+          "command": "factorio.compile",
+          "when": "view == factoriomods && viewItem =~ /hascompile/",
+          "group": "2_basic@1"
+        },
+        {
           "command": "factorio.datestamp",
-          "when": "viewItem == factoriomodpackage",
-          "group": "basic@1"
+          "when": "view == factoriomods && viewItem =~ /latest/ && viewItem =~ /haschangelog/",
+          "group": "2_basic@2"
         },
         {
           "command": "factorio.package",
-          "when": "viewItem == factoriomodpackage",
-          "group": "basic@2"
+          "when": "view == factoriomods && viewItem =~ /latest/",
+          "group": "2_basic@3"
         },
         {
           "command": "factorio.version",
-          "when": "viewItem == factoriomodpackage",
-          "group": "basic@3"
+          "when": "view == factoriomods && viewItem =~ /latest/",
+          "group": "2_basic@4"
         },
         {
           "command": "factorio.upload",
-          "when": "viewItem == factoriomodpackage",
-          "group": "basic@4"
+          "when": "view == factoriomods && viewItem =~ /latest/",
+          "group": "2_basic@5"
         },
         {
           "command": "factorio.publish",
-          "when": "viewItem == factoriomodpackage",
-          "group": "publish@1"
+          "when": "view == factoriomods && viewItem =~ /latest/",
+          "group": "3_publish@1"
         },
         {
-          "command": "factorio.datestamp",
-          "when": "viewItem == factoriomodpackage",
+          "command": "factorio.openchangelog",
+          "when": "view == factoriomods && viewItem =~ /haschangelog/",
           "group": "inline@1"
         },
         {
-          "command": "factorio.package",
-          "when": "viewItem == factoriomodpackage",
+          "command": "factorio.datestamp",
+          "when": "view == factoriomods && viewItem =~ /latest/ && viewItem =~ /haschangelog/",
           "group": "inline@2"
         },
         {
-          "command": "factorio.version",
-          "when": "viewItem == factoriomodpackage",
+          "command": "factorio.package",
+          "when": "view == factoriomods && viewItem =~ /latest/",
           "group": "inline@3"
         },
         {
-          "command": "factorio.upload",
-          "when": "viewItem == factoriomodpackage",
+          "command": "factorio.version",
+          "when": "view == factoriomods && viewItem =~ /latest/",
           "group": "inline@4"
         },
         {
-          "command": "factorio.publish",
-          "when": "viewItem == factoriomodpackage",
+          "command": "factorio.upload",
+          "when": "view == factoriomods && viewItem =~ /latest/",
           "group": "inline@5"
+        },
+        {
+          "command": "factorio.publish",
+          "when": "view == factoriomods && viewItem =~ /latest/",
+          "group": "inline@6"
         }
       ]
     },
@@ -452,6 +509,10 @@
       {
         "language": "factorio-changelog",
         "path": "./snippets/factorio-changelog.json"
+      },
+      {
+        "language": "factorio-locale",
+        "path": "./snippets/factorio-locale.json"
       }
     ],
     "configurationDefaults": {
@@ -459,12 +520,9 @@
         "editor.detectIndentation": false,
         "editor.insertSpaces": true,
         "editor.tabSize": 2,
-        "gitlens.codeLens.scopes": [
-          "document",
-          "custom"
-        ],
         "gitlens.codeLens.symbolScopes": [
-          "Namespace"
+          "Namespace",
+          "!Class"
         ]
       }
     },
@@ -501,7 +559,12 @@
           "info.json",
           "!locale/*/info.json",
           "!data/**/info.json",
-          "!tests/**/info.json"
+          "!tests/**/info.json",
+          "!temp/**/info.json",
+          "!campaigns/*/info.json",
+          "!scenarios/*/info.json",
+          "!saves/**/info.json",
+          "!blueprint/info.json"
         ],
         "url": "./schema/modinfo.json"
       },
@@ -509,7 +572,11 @@
         "fileMatch": [
           "data/**/info.json",
           "tests/**/info.json",
-          "!locale/*/info.json"
+          "!locale/*/info.json",
+          "!campaigns/*/info.json",
+          "!scenarios/*/info.json",
+          "!saves/**/info.json",
+          "!blueprint/info.json"
         ],
         "url": "./schema/datainfo.json"
       },
@@ -547,15 +614,28 @@
               "trace": {
                 "type": "boolean",
                 "description": "Enable logging of the Debug Adapter Protocol.",
-                "default": false
+                "default": false,
+                "examples": [
+                  true
+                ]
               },
               "factorioPath": {
                 "type": "string",
-                "description": "Path to Factorio binary."
+                "description": "Path to Factorio binary.",
+                "examples": [
+                  "C:/Program Files (x86)/Steam/steamapps/common/Factorio/bin/x64/factorio.exe",
+                  "C:/Program Files/Factorio/bin/x64/factorio.exe",
+                  "~/Library/Application Support/Steam/steamapps/common/Factorio/factorio.app/Contents/MacOS/factorio",
+                  "/Applications/factorio.app/Contents/MacOS/factorio",
+                  "~/.factorio/bin/x64/factorio"
+                ]
               },
               "nativeDebugger": {
                 "type": "string",
-                "description": "Native debugger to launch factorio with"
+                "description": "Native debugger to launch factorio with",
+                "examples": [
+                  "vsjitdebugger.exe"
+                ]
               },
               "configPath": {
                 "type": "string",
@@ -575,10 +655,38 @@
                 "description": "Use Instrument Mode to hook all mods. Requires Factorio >= 0.18.10",
                 "default": true
               },
+              "checkPrototypes": {
+                "type": "boolean",
+                "description": "Add --check-unused-prototype-data to factorioArgs."
+              },
+              "checkEvents": {
+                "type": [
+                  "boolean",
+                  "array"
+                ],
+                "description": "Check for complete sets of event registrations. Boolean to enable/disable for all mods, or array of mod names.",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "checkGlobals": {
+                "type": [
+                  "boolean",
+                  "array"
+                ],
+                "description": "Check for assignment to undefined globals. Boolean to enable/disable for all mods, or array of mod names (`#settings` and `#data` for settings/data stage).",
+                "items": {
+                  "type": "string"
+                }
+              },
               "factorioArgs": {
                 "type": "array",
                 "items": {
-                  "type": "string"
+                  "type": "string",
+                  "examples": [
+                    "--load-scenario",
+                    "--disable-migration-window"
+                  ]
                 },
                 "default": [],
                 "description": "Extra command line arguments to pass to Factorio"
@@ -595,6 +703,49 @@
                       "pattern": "(\\d+\\.){2}\\d+"
                     }
                   ]
+                }
+              },
+              "adjustModSettings": {
+                "description": "List of settings to adjust before launching",
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "defaultSnippets": [
+                    {
+                      "label": "setting",
+                      "body": {
+                        "scope": "${1|startup,runtime-global,runtime-per-player|}",
+                        "name": "$2",
+                        "value": "$3"
+                      }
+                    }
+                  ],
+                  "required": [
+                    "scope",
+                    "name"
+                  ],
+                  "properties": {
+                    "scope": {
+                      "enum": [
+                        "startup",
+                        "runtime-global",
+                        "runtime-per-player"
+                      ],
+                      "description": "The scope of the setting to adjust"
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "The prototype name of the setting to adjust"
+                    },
+                    "value": {
+                      "description": "New value for setting, omit to clear setting",
+                      "type": [
+                        "boolean",
+                        "number",
+                        "string"
+                      ]
+                    }
+                  }
                 }
               },
               "disableExtraMods": {
@@ -650,6 +801,12 @@
                 "default": 5000,
                 "minimum": 1
               },
+              "runningTimeout": {
+                "type": "integer",
+                "description": "Timeout in ms for eval and variables requests while running",
+                "default": 2000,
+                "minimum": 1000
+              },
               "profileSlowStart": {
                 "type": "integer",
                 "description": "Number of events to dump profilers after every Lua stack at startup (to allow for saving for migration). Increase this if you're getting errors at startup while profiling.",
@@ -690,6 +847,14 @@
           {
             "type": "factoriomod",
             "request": "launch",
+            "name": "Factorio Mod Debug (Settings & Data)",
+            "factorioPath": "",
+            "hookSettings": true,
+            "hookData": true
+          },
+          {
+            "type": "factoriomod",
+            "request": "launch",
             "name": "Factorio Mod Debug (Profile)",
             "factorioPath": "",
             "hookMode": "profile"
@@ -703,17 +868,17 @@
               "type": "factoriomod",
               "request": "launch",
               "name": "Factorio Mod Debug",
-              "factorioPath": ""
+              "factorioPath": "$0"
             }
           },
           {
             "label": "Factorio Mod Debug: Profile",
-            "description": "A new configuration for debugging Factorio mods.",
+            "description": "A new configuration for profiling Factorio mods.",
             "body": {
               "type": "factoriomod",
               "request": "launch",
               "name": "Factorio Mod Debug (Profile)",
-              "factorioPath": "",
+              "factorioPath": "$0",
               "hookMode": "profile"
             }
           }

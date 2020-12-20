@@ -1,5 +1,7 @@
 local oldpcall = pcall
 local oldxpcall = xpcall
+local debug = debug
+local print = print
 local localised_print = localised_print
 local __DebugAdapter = __DebugAdapter
 
@@ -51,36 +53,53 @@ __DebugAdapter.stepIgnore(stack_has_location)
 local on_exception
 if __DebugAdapter.instrument then
   on_exception = function (mesg)
-    if not stack_has_location() then return end
+    if not stack_has_location() then
+      __DebugAdapter.popStack()
+      return
+    end
     local mtype = type(mesg)
     -- don't bother breaking when a remote.call's error bubbles up, we've already had that one...
-    if mtype == "string" and mesg:match("^Error when running interface function (.+)$") then
+    if mtype == "string" and (
+        mesg:match("^Error when running interface function") or
+        mesg:match("^The mod [a-zA-Z0-9 _-]+ %([0-9.]+%) caused a non%-recoverable error")
+        )then
+      __DebugAdapter.popStack()
       return
     end
     print_exception("unhandled",mesg)
     debug.debug()
+    __DebugAdapter.popStack()
     return
   end
 else
   on_exception = function (mesg)
-    if not stack_has_location() then return mesg end
+    if not stack_has_location() then
+      __DebugAdapter.popStack()
+      return mesg
+    end
     local mtype = type(mesg)
     if mtype == "string" then
-      if mesg:match("^Error when running interface function (.+)$") then
+      if mesg:match("^Error when running interface function") or
+          mesg:match("^The mod [a-zA-Z0-9 _-]+ %([0-9.]+%) caused a non%-recoverable error")
+        then
+        __DebugAdapter.popStack()
         return mesg
       end
       print_exception("unhandled", mesg)
       debug.debug()
+      __DebugAdapter.popStack()
       return mesg
     elseif mtype == "table" and mesg[1] and mesg[1] == "REMSTEP" then
       mesg[1] = ""
       -- 0=traceback 1=on_exception 2=error (rethrow from hook) 3=remote.call hook 4=calling code to remote.call
       -- remove two lines -1=try_func or remoteCallInner, -2=xpcall
       mesg[#mesg+1] = debug.traceback("",4):match("^(.+)\n[^\n]+\n[^\n]+$")
+      __DebugAdapter.popStack()
       return mesg
     else
       print_exception("unhandled",mesg)
       debug.debug()
+      __DebugAdapter.popStack()
       return mesg
     end
   end
@@ -161,6 +180,9 @@ local newscript = {
 
 local registered_handlers = {}
 local function check_events(f)
+  if __DebugAdapter.checkEvents == false then
+    return f
+  end
   local de = defines.events
   local groups = {
     built = {
@@ -327,21 +349,26 @@ function newscript.get_event_handler(event)
 end
 
 function newscript.raise_event(event,eventdata)
-  -- factorio adds `mod_name`, so i don't need to
-  eventdata.__debug = {
-    stack = __DebugAdapter.stackTrace(-2, nil, true),
+  __DebugAdapter.pushStack{
+    source = "raise_event",
+    mod_name = script.mod_name,
+    stack = __DebugAdapter.stackTrace(-2, true),
   }
   oldscript.raise_event(event,eventdata)
+  __DebugAdapter.popStack()
 end
 
 local function wrap_raise(key)
-  if type(oldscript[key])=="function" then
+  local raise = oldscript[key]
+  if type(raise)=="function" then
     newscript[key] = function (eventdata)
-      -- factorio adds `mod_name`, so i don't need to
-      eventdata.__debug = {
-        stack = __DebugAdapter.stackTrace(-2, nil, true),
+      __DebugAdapter.pushStack{
+        source = "raise_event",
+        mod_name = script.mod_name,
+        stack = __DebugAdapter.stackTrace(-2, true),
       }
-      oldscript[key](eventdata)
+      raise(eventdata)
+      __DebugAdapter.popStack()
     end
   end
 end
@@ -364,6 +391,7 @@ local newscriptmeta = {
   __index = oldscript,
   __newindex = function(t,k,v) oldscript[k] = v end,
   __debugline = "<LuaBootstrap Debug Proxy>",
+  __debugtype = "DebugAdapter.LuaBootstrap",
 }
 __DebugAdapter.stepIgnoreAll(newscript)
 __DebugAdapter.stepIgnoreAll(newscriptmeta)
@@ -386,6 +414,7 @@ local newcommandsmeta = {
   __index = oldcommands,
   __newindex = function(t,k,v) oldcommands[k] = v end,
   __debugline = "<LuaCommandProcessor Debug Proxy>",
+  __debugtype = "DebugAdapter.LuaCommandProcessor",
 }
 __DebugAdapter.stepIgnoreAll(newcommands)
 __DebugAdapter.stepIgnoreAll(newcommandsmeta)

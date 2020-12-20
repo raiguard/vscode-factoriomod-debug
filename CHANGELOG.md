@@ -1,8 +1,99 @@
 # Changelog
 
+[<img height='36' style='border:0px;height:36px;' src='https://az743702.vo.msecnd.net/cdn/kofi2.png?v=2' border='0' alt='Buy Me a Coffee at ko-fi.com'/>](https://ko-fi.com/X8X41IE4T)
+
+## 1.1.2
+
+* Show best-guess arguments for `__index` and `__newindex` in stack trace
+* Collect and display stacks for some api calls that can raise events
+* Display enum properties of LuaObjects as names from `defines.*`
+* Metatable field `__debugtype` to set the displayed typename of an object
+* Show table keys with virtual children `<key>` and `<value>` and rename with unique names
+* Upload task now looks for zips in the correct place when Package is configured to place them outside the mod folder
+* Launch option `adjustModSettings` to update/clear mod settings before launching a debug session
+* Don't hang when `info.json` with `null` exists in workspace
+* Don't set extension filter on factorioPath prompt on non-windows
+* Update class data to Factorio 1.1.6
+
+## 1.1.1
+
+* Fix setting breakpoints during simulations
+
+## 1.1.0
+
+* Always use `-F -` for tags, even when empty
+* Fix infinite recursion when cleaning long refs
+* Disabled expandable log items from `__DebugAdapter.print({...})` by default due to issues with vscode debug console
+* Updated class data and mod for Factorio 1.1.0
+
+## 0.18.49
+
+* Correctly highlight empty plural
+* Fixed crash if an on_tick handler with no argument has a LuaObject in its first temporary when building callstack
+* Ignore info.json in scenarios/saves
+
+## 0.18.48
+
+* Fix error when mods replace builtin `print` incorrectly
+
+## 0.18.47
+
+* Pretty-print mod-list.json when adjusting mods
+* Stricter check for LuaObjects in isUnsafeLong()
+
+## 0.18.46
+
+* Removed Locale highlighter rule for unrecognized rich text tags
+* Fixed script error when setting checkEvents or checkGlobals
+
+## 0.18.45
+
+* Capture `debug` in case someone overwites it
+
+## 0.18.44
+
+* Reworked locale highlighter
+* Locale Snippets for various tags/variables
+* Correctly highlight locale variable `__CONTROL_MOVE__`
+* CodeAction to merge duplicate locale sections
+
+## 0.18.43
+
+* Correctly include `profile-control.lua` when debugadapter itself is not hooked
+
+## 0.18.42
+
+* Fix flamegraph not building trees correctly
+* Configuration options for various extra diagnostics
+* `postpublish` task
+* Open Changelog command in packages view
+* Eval now correctly uses the last matching local instead of the first
+* Rename shadowed locals in Variables view so they display correctly
+* Fixed not correctly differentiating multiple varRefs for the same table with `extra` property set
+* Mark generated variables as `virtual`
+
+## 0.18.41
+
+* Debug console supports `__modname__` prefix while in break
+* Better error reporting for tasks.json tasks
+* Branch name configuration for Publish was not correctly applied
+* Timeout on queued stdin commands configurable, raised default to 2s
+* Restrict tasks to operate only on the latest version of a mod
+* Support `~` in launch.json path options
+
+## 0.18.40
+
+* Fixed incorrect vars showing when first retreived after stopping on first stop in a lua state
+
+## 0.18.39
+
+* Fixed incorrect vars showing when first retreived after stopping
+
 ## 0.18.38
 
 * Fixed debug session not ending when factorio closes
+* More consistent use of URIs for path mapping
+* Debug console supports `__modname__` prefix when named Lua State is available (correctly this time...)
 
 ## 0.18.37
 

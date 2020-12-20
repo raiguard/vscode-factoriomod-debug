@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as ini from 'ini';
 import { FactorioModDebugSession } from './factorioModDebug';
-import { validateLocale, LocaleColorProvider, LocaleDocumentSymbolProvider } from './LocaleLangProvider';
+import { validateLocale, LocaleColorProvider, LocaleDocumentSymbolProvider, LocaleCodeActionProvider } from './LocaleLangProvider';
 import { ChangelogCodeActionProvider, validateChangelogTxt, ChangelogDocumentSymbolProvider } from './ChangeLogLangProvider';
 import { ModsTreeDataProvider } from './ModPackageProvider';
 
@@ -16,13 +16,13 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('factoriomod', provider));
 
 	// debug adapters can be run in different ways by using a vscode.DebugAdapterDescriptorFactory:
-	let factory = new InlineDebugAdapterFactory(context);
+	const factory = new InlineDebugAdapterFactory(context);
 
 	context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('factoriomod', factory));
 	context.subscriptions.push(factory);
 
 
-	diagnosticCollection = vscode.languages.createDiagnosticCollection('factorio-changelog');
+	diagnosticCollection = vscode.languages.createDiagnosticCollection('factorio');
 	context.subscriptions.push(diagnosticCollection);
 
 	context.subscriptions.push(
@@ -32,6 +32,10 @@ export function activate(context: vscode.ExtensionContext) {
 		// check diagnostics
 		uris.forEach(async uri=> diagnosticCollection.set(uri, await validateChangelogTxt(uri)));
 	});
+
+	context.subscriptions.push(
+		vscode.languages.registerCodeActionsProvider({ scheme: 'file', language: 'factorio-locale' }, new LocaleCodeActionProvider()));
+
 
 	vscode.workspace.findFiles("**/locale/*/*.cfg").then(uris => {
 		// check diagnostics
@@ -66,7 +70,7 @@ export function activate(context: vscode.ExtensionContext) {
 			{scheme:"file", language:"factorio-locale"}, new LocaleDocumentSymbolProvider()));
 
 	if (vscode.workspace.workspaceFolders) {
-		let treeDataProvider = new ModsTreeDataProvider(context);
+		const treeDataProvider = new ModsTreeDataProvider(context);
 		const view = vscode.window.createTreeView('factoriomods', { treeDataProvider: treeDataProvider });
 		context.subscriptions.push(view);
 	}
@@ -129,13 +133,11 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 		// factorio path exists and is a file (and is a binary?)
 
 		if (!config.factorioPath) {
-			let factorioPath = await vscode.window.showOpenDialog({
+			const factorioPath = await vscode.window.showOpenDialog({
 				canSelectFiles: true,
 				canSelectFolders: false,
 				openLabel: "Select Factorio binary",
-				filters: {
-					"": ["exe", ""]
-				}
+				filters: os.platform() === "win32" ? { "": ["exe"] } : undefined
 			});
 			if (factorioPath)
 			{
@@ -146,6 +148,10 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 		if(!config.factorioPath){
 			vscode.window.showInformationMessage("factorioPath is required");
 			return undefined;	// abort launch
+		} else if (config.factorioPath.match(/^~[\\\/]/)){
+			config.factorioPath = path.posix.join(
+				os.homedir().replace(/\\/g,"/"),
+				config.factorioPath.replace(/^~[\\\/]/,"") );
 		}
 		if(!fs.existsSync(config.factorioPath) ){
 			vscode.window.showInformationMessage(`factorioPath "${config.factorioPath}" does not exist`);
@@ -183,6 +189,10 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 				config.configPath = translatePath("__PATH__system-write-data__/config/config.ini",config.factorioPath);
 			}
 			config.configPathDetected = true;
+		} else if (config.configPath.match(/^~[\\\/]/)){
+			config.configPath = path.posix.join(
+				os.homedir().replace(/\\/g,"/"),
+				config.configPath.replace(/^~[\\\/]/,"") );
 		}
 
 		if (!fs.existsSync(config.configPath))
@@ -232,7 +242,12 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 		{
 			config.modsPathSource = "launch";
 			let modspath = path.posix.normalize(config.modsPath);
-			if (modspath.endsWith("/") || modspath.endsWith("\\"))
+			if (modspath.match(/^~[\\\/]/)){
+				modspath = path.posix.join(
+					os.homedir().replace(/\\/g,"/"),
+					modspath.replace(/^~[\\\/]/,"") );
+			}
+			if (modspath.match(/[\\\/]$/))
 			{
 				modspath = modspath.replace(/[\\\/]+$/,"");
 			}
@@ -315,13 +330,7 @@ class FactorioModConfigurationProvider implements vscode.DebugConfigurationProvi
 }
 
 class InlineDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
-
-	private readonly context: vscode.ExtensionContext;
-
-	constructor(context: vscode.ExtensionContext)
-	{
-		this.context = context;
-	}
+	constructor(private readonly context: vscode.ExtensionContext) {}
 
 	createDebugAdapterDescriptor(_session: vscode.DebugSession): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
 		const fmds = new FactorioModDebugSession();

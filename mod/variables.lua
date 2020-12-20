@@ -32,11 +32,13 @@ local remote = remote and rawget(remote,"__raw") or remote
 -- Trying to expand the refs table causes some problems, so just hide it...
 local refsmeta = {
   __debugline = "<Debug Adapter Variable ID Cache [{table_size(self)}]>",
+  __debugtype = "DebugAdapter.VariableRefs",
   __debugchildren = false,
 }
 
 local longrefsmeta = {
   __debugline = "<Debug Adapter Long-lived Variable ID Cache [{table_size(self)}]>",
+  __debugtype = "DebugAdapter.VariableLongRefs",
   __debugchildren = false,
 }
 
@@ -68,6 +70,7 @@ local globalbuiltins={
 
 }
 gmeta.__debugline = "<Global Self Reference>"
+gmeta.__debugtype = "_ENV"
 gmeta.__debugchildren = function(t,extra)
   local vars = {}
   if not extra then
@@ -76,12 +79,14 @@ gmeta.__debugchildren = function(t,extra)
       value = "<Lua Builtin Globals>",
       type = "<Lua Builtin Globals>",
       variablesReference = variables.tableRef(t,nil,false,"builtin"),
+      presentationHint = {kind="virtual"},
     }
     vars[#vars + 1] =  {
       name = "<Factorio API>",
       value = "<Factorio API>",
       type = "<Factorio API>",
       variablesReference = variables.tableRef(t,nil,false,"factorio"),
+      presentationHint = {kind="virtual"},
     }
 
   end
@@ -97,53 +102,63 @@ gmeta.__debugchildren = function(t,extra)
 end
 __DebugAdapter.stepIgnore(gmeta.__debugchildren)
 
-local definedGlobals = {_=true}
-function __DebugAdapter.defineGlobal(name)
-  definedGlobals[name] = true
-end
-
-local function ignore_global(k,info)
-  if definedGlobals[k] then return true end
-  if info.source:match("^@__core__") then return true end
-  if info.source:match("^@__base__") then return true end
-  return false
-end
-__DebugAdapter.stepIgnore(ignore_global)
-
-function gmeta.__newindex(t,k,v)
-  local info = debug.getinfo(2,"lS")
-  if not ignore_global(k,info) then
-    local body = {
-      category = "console",
-      output = "Assignment to undefined global: "..k.."="..variables.describe(v),
-    }
-    local istail = debug.getinfo(1,"t")
-    if istail.istailcall then
-      body.line = 1
-      body.source = "=(...tailcall...)"
-    else
-      body.line = info.currentline
-      body.source = normalizeLuaSource(info.source)
-    end
-    print("DBGprint: " .. json.encode(body))
+if __DebugAdapter.checkGlobals ~= false then
+  local definedGlobals = {_=true}
+  function __DebugAdapter.defineGlobal(name)
+    definedGlobals[name] = true
   end
-  rawset(t,k,v)
+
+  local function ignore_global(k,info)
+    if definedGlobals[k] then return true end
+    if info.source:match("^@__core__") then return true end
+    if info.source:match("^@__base__") then return true end
+    return false
+  end
+  __DebugAdapter.stepIgnore(ignore_global)
+
+  function gmeta.__newindex(t,k,v)
+    local info = debug.getinfo(2,"lS")
+    if not ignore_global(k,info) then
+      local body = {
+        category = "console",
+        output = "Assignment to undefined global: "..k.."="..variables.describe(v),
+      }
+      local istail = debug.getinfo(1,"t")
+      if istail.istailcall then
+        body.line = 1
+        body.source = "=(...tailcall...)"
+      else
+        body.line = info.currentline
+        body.source = normalizeLuaSource(info.source)
+      end
+      print("DBGprint: " .. json.encode(body))
+    end
+    rawset(t,k,v)
+  end
+  __DebugAdapter.stepIgnore(gmeta.__newindex)
 end
-__DebugAdapter.stepIgnore(gmeta.__debugchildren)
 
 -- variable id refs
 local nextID
 do
   local nextRefID
+  local nextEnd
   function __DebugAdapter.transferRef(ref)
     nextRefID = ref
+    nextEnd = ref+65535
   end
   function nextID()
     -- request from extension
+    if nextRefID and nextRefID<nextEnd then
+      local ref = nextRefID
+      nextRefID = ref + 1
+      return ref
+    end
     print("DBG: getref")
     debug.debug(); -- call __DebugAdapter.transferRef(ref) and continue
     return nextRefID
   end
+  __DebugAdapter.stepIgnore(nextID)
 end
 
 do
@@ -165,11 +180,23 @@ do
     end
   end
 
-  local function isUnsafeLong(t)
-    if type(t) ~= "table" then return false end
-    if rawget(t,"__self") then return luaObjectInfo.noLongRefs[t.object_name:match("^([^.]+).?")] end
+  local function isUnsafeLong(t,seen)
+    if not seen then
+      seen = {}
+    else
+      if seen[t] then
+        return false -- circular isn't inherently unsafe, unless something *else* in the table is
+      end
+    end
+    if type(t) ~= "table" then
+      return false
+    end
+    if type(rawget(t,"__self"))=="userdata" and getmetatable(t)=="private" then
+      return luaObjectInfo.noLongRefs[t.object_name:match("^([^.]+)%.?")]
+    end
+    seen[t] = true
     for k,v in pairs(t) do
-      if isUnsafeLong(k) or isUnsafeLong(v) then
+      if isUnsafeLong(k,seen) or isUnsafeLong(v,seen) then
         return true
       end
     end
@@ -219,6 +246,31 @@ function variables.scopeRef(frameId,name,mode)
   return id
 end
 
+
+--- Generate a variablesReference for a key-value-pair for complex keys object
+---@param key table
+---@param value any
+---@return number variablesReference
+---@return string keyName
+function variables.kvRef(key,value)
+  local refs = variables.longrefs
+
+  for id,varRef in pairs(refs) do
+    if varRef.type == "kvPair" and varRef.key == key and varRef.value == value then
+      return id,varRef.name
+    end
+  end
+  local id = nextID()
+  local name = "{<"..variables.tableRef(key,nil,nil,nil,nil,true)..">}"
+  refs[id] = {
+    type = "kvPair",
+    key = key,
+    value = value,
+    name = name,
+  }
+  return id,name
+end
+
 --- Generate a variablesReference for a table-like object
 ---@param table table
 ---@param mode string "pairs"|"ipairs"|"count"
@@ -235,7 +287,7 @@ function variables.tableRef(table, mode, showMeta, extra, evalName,long)
     evalName = nil
   end
   for id,varRef in pairs(refs) do
-    if varRef.type == "Table" and varRef.table == table and varRef.mode == mode and varRef.showMeta == showMeta then
+    if varRef.type == "Table" and varRef.table == table and varRef.mode == mode and varRef.showMeta == showMeta and varRef.extra == extra then
       return id
     end
   end
@@ -295,7 +347,7 @@ function variables.describe(value,short)
       if vtype == "LuaCustomTable" then
           lineitem = ("%d item%s"):format(#value, #value~=1 and "s" or "" )
       else
-        if luaObjectInfo.alwaysValid[vtype:match("^([^.]+).?")] or value.valid then
+        if luaObjectInfo.alwaysValid[vtype:match("^([^.]+)%.?")] or value.valid then
           local lineitemfmt = luaObjectInfo.lineItem[vtype]
           lineitem = ("<%s>"):format(vtype)
           local litype = type(lineitemfmt)
@@ -439,6 +491,9 @@ function variables.create(name,value,evalName,long)
       variablesReference = variables.tableRef(value,nil,nil,nil,evalName,long)
       -- children counts for mt children?
     end
+    if mt and type(mt.__debugtype) == "string" then
+      vtype = mt.__debugtype
+    end
   end
   return {
     name = name,
@@ -490,25 +545,6 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
       local mode = varRef.mode
       local hasTemps =  false
       local i = 1
-      while true do
-        local name,value = debug.getlocal(varRef.frameId,i)
-        if not name then break end
-        local isTemp = name:sub(1,1) == "("
-        if isTemp then hasTemps = true end
-        if (mode == "temps" and isTemp) or (not mode and not isTemp) then
-          local evalName
-          if isTemp then
-            name = ("%s %d)"):format(name:sub(1,-2),i)
-          else
-            evalName = name
-          end
-          vars[#vars + 1] = variables.create(name,value,evalName)
-        end
-        i = i + 1
-      end
-      if not mode and hasTemps then
-        table.insert(vars,1,{ name = "<temporaries>", value = "<temporaries>", variablesReference = variables.scopeRef(varRef.frameId,"Locals","temps") })
-      end
 
       if mode == "varargs" then
         i = -1
@@ -518,13 +554,50 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
           vars[#vars + 1] = variables.create(("(*vararg %d)"):format(-i),value)
           i = i - 1
         end
-      elseif not mode then
-        local info = debug.getinfo(varRef.frameId,"u")
-        if info.isvararg then
-          local varargidx = info.nparams + 1
-          if hasTemps then varargidx = varargidx + 1 end
-
-          table.insert(vars,varargidx,{ name = "<varargs>", value = "<varargs>", variablesReference = variables.scopeRef(varRef.frameId,"Locals","varargs") })
+      else
+        local shadow = {}
+        while true do
+          local name,value = debug.getlocal(varRef.frameId,i)
+          if not name then break end
+          local isTemp = name:sub(1,1) == "("
+          if isTemp then hasTemps = true end
+          if (mode == "temps" and isTemp) or (not mode and not isTemp) then
+            local evalName
+            if isTemp then
+              name = ("%s %d)"):format(name:sub(1,-2),i)
+            else
+              evalName = name
+            end
+            local j = #vars + 1
+            local lastshadow = shadow[name]
+            if lastshadow then
+              local var = vars[lastshadow.index]
+              var.name = var.name.."@"..lastshadow.reg
+              if var.evaluateName then var.evaluateName = nil end
+            end
+            vars[j] = variables.create(name,value,evalName)
+            shadow[name] = {index = j, reg = i}
+          end
+          i = i + 1
+        end
+        if not mode then
+          if hasTemps then
+            table.insert(vars,1,{
+              name = "<temporaries>", value = "<temporaries>",
+              variablesReference = variables.scopeRef(varRef.frameId,"Locals","temps"),
+              presentationHint = {kind="virtual"},
+            })
+          end
+          local info = debug.getinfo(varRef.frameId,"u")
+          if info.isvararg then
+            local varargidx = info.nparams + 1
+            if hasTemps then varargidx = varargidx + 1 end
+            table.insert(vars,varargidx,{
+              name = "<varargs>", value = "<varargs>",
+              variablesReference = variables.scopeRef(varRef.frameId,"Locals","varargs"),
+              presentationHint = {kind="virtual"},
+            })
+          end
         end
       end
     elseif varRef.type == "Upvalues" then
@@ -552,6 +625,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
             type = "metatable",
             variablesReference = variables.tableRef(mt,nil,nil,nil,nil,long),
             evaluateName = evalName,
+            presentationHint = {kind="virtual"},
           }
         end
         local stop = #varRef.table
@@ -589,6 +663,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
               value = variables.describe(children),
               type = "childerror",
               variablesReference = 0,
+              presentationHint = {kind="virtual"},
             }
           end
         else
@@ -604,6 +679,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
               type = "metatable",
               variablesReference = variables.tableRef(mt,nil,nil,nil,nil,long),
               evaluateName = evalName,
+              presentationHint = {kind="virtual"},
             }
           end
 
@@ -617,7 +693,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
               value = i and ("{LocalisedString "..i.."}") or ("<"..mesg..">"),
               type = "LocalisedString",
               variablesReference = 0,
-              presentationHint = { kind = "property", attributes = { "readOnly" } },
+              presentationHint = { kind = "virtual", attributes = { "readOnly" } },
             }
           end
 
@@ -649,7 +725,11 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
                 evalName = varRef.evalName .. "[" .. variables.describe(k,true) .. "]"
               end
               local kline,ktype = variables.describe(k,true)
-              vars[#vars + 1] = variables.create(kline,v, evalName,long)
+              local newvar = variables.create(kline,v, evalName,long)
+              if ktype == "table" then
+                newvar.variablesReference,newvar.name = variables.kvRef(k,v)
+              end
+              vars[#vars + 1] = newvar
               if count then
                 count = count - 1
                 if count == 0 then break end
@@ -661,6 +741,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
               value = "missing iterator for table varRef mode ".. varRef.mode,
               type = "childerror",
               variablesReference = 0,
+              presentationHint = {kind="virtual"},
             }
           end
         end
@@ -694,7 +775,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
                 type = varRef.classname .. "[]",
                 variablesReference = variables.tableRef(object, keyprops.iterMode, false,nil,varRef.evalName,long),
                 indexedVariables = #object + 1,
-                presentationHint = { kind = "property", attributes = { "readOnly" } },
+                presentationHint = { kind = "virtual", attributes = { "readOnly" } },
               }
             elseif keyprops.thisTranslated then
               local value = "<Translation Not Available>"
@@ -712,7 +793,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
                 value = value,
                 type = "LocalisedString",
                 variablesReference = 0,
-                presentationHint = { kind = "property", attributes = { "readOnly" } },
+                presentationHint = { kind = "virtual", attributes = { "readOnly" } },
               }
             else
               -- Not all keys are valid on all LuaObjects of a given type. Just skip the errors (or nils)
@@ -723,6 +804,21 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
                   evalName = varRef.evalName .. "[" .. variables.describe(key,true) .. "]"
                 end
                 local var = variables.create(variables.describe(key,true),value,evalName,long)
+
+                local enum = keyprops.enum
+                local tenum = type(enum)
+                if tenum == "table" then
+                  local name = enum[value]
+                  if name then
+                    var.value = name
+                  end
+                elseif tenum == "function" then
+                  local success,name = pcall(enum,object,value)
+                  if success and name then
+                    var.value = name
+                  end
+                end
+
                 if keyprops.countLine then
                   var.value = ("%d item%s"):format(#value, #value~=1 and "s" or "")
                 end
@@ -746,6 +842,9 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
           presentationHint = { kind = "property", attributes = { "readOnly" } },
         }
       end
+    elseif varRef.type == "kvPair" then
+      vars[#vars + 1] = variables.create("<key>",varRef.key, nil, true)
+      vars[#vars + 1] = variables.create("<value>",varRef.value)
     end
     if #vars == 0 then
       vars[1] = {
@@ -753,7 +852,7 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
         value = "empty",
         type = "empty",
         variablesReference = 0,
-        presentationHint = { kind = "property", attributes = { "readOnly" } },
+        presentationHint = { kind = "virtual", attributes = { "readOnly" } },
       }
     end
   elseif not longonly then
@@ -761,11 +860,12 @@ function __DebugAdapter.variables(variablesReference,seq,filter,start,count,long
       name= "Expired variablesReference",
       value= "Expired variablesReference ref="..variablesReference.." seq="..seq,
       variablesReference= 0,
+      presentationHint = {kind="virtual"},
     }
   end
 
   if varRef or (not longonly) then
-    print("DBGvars: " .. json.encode({variablesReference = variablesReference, seq = seq, vars = vars}))
+    print("DBGvars: " .. json.encode({variablesReference = variablesReference, seq = seq, vars = vars, long = longonly and script.mod_name}))
     return true
   end
 end
@@ -781,29 +881,50 @@ function __DebugAdapter.setVariable(variablesReference, name, value, seq)
     if varRef.type == "Locals" then
       if varRef.mode ~= "varargs" then
         local i = 1
-        while true do
-          local lname,oldvalue = debug.getlocal(varRef.frameId,i)
-          if not lname then break end
-          if lname:sub(1,1) == "(" then
-            lname = ("%s %d)"):format(lname:sub(1,-2),i)
+        local localindex
+        local matchname,matchidx = name:match("^([_%a][_%w]*)@(%d+)$")
+        if matchname then
+          local lname = debug.getlocal(varRef.frameId,matchidx)
+          if lname == matchname then
+            localindex = matchidx
+          else
+            print("DBGsetvar: " .. json.encode({seq = seq, body = {
+              type="error",
+              value="name mismatch at register "..matchidx.." expected `"..matchname.."` got `"..lname.."`"
+            }}))
+            return
           end
-          if lname == name then
-            local goodvalue,newvalue = __DebugAdapter.evaluateInternal(varRef.frameId+1,nil,"setvar",value)
-            if goodvalue then
-              debug.setlocal(varRef.frameId,i,newvalue)
-              print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,newvalue)}))
-              return
-            else
-              print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,oldvalue)}))
-              return
+        else
+          while true do
+            local lname = debug.getlocal(varRef.frameId,i)
+            if not lname then break end
+            if lname:sub(1,1) == "(" then
+              lname = ("%s %d)"):format(lname:sub(1,-2),i)
             end
+            if lname == name then
+              localindex = i
+            end
+            i = i + 1
           end
-          i = i + 1
+        end
+        if localindex then
+          local goodvalue,newvalue = __DebugAdapter.evaluateInternal(varRef.frameId+1,nil,"setvar",value)
+          if goodvalue then
+            debug.setlocal(varRef.frameId,localindex,newvalue)
+            print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,newvalue)}))
+            return
+          else
+            print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value=newvalue}}))
+            return
+          end
+        else
+          print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value="named var not present"}}))
+          return
         end
       else
         local i = -1
         while true do
-          local vaname,oldvalue = debug.getlocal(varRef.frameId,i)
+          local vaname = debug.getlocal(varRef.frameId,i)
           if not vaname then break end
           vaname = ("(*vararg %d)"):format(-i)
           if vaname == name then
@@ -813,18 +934,20 @@ function __DebugAdapter.setVariable(variablesReference, name, value, seq)
               print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,newvalue)}))
               return
             else
-              print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,oldvalue)}))
+              print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value=newvalue}}))
               return
             end
           end
           i = i - 1
         end
       end
+      print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value="invalid local name"}}))
+      return
     elseif varRef.type == "Upvalues" then
       local func = debug.getinfo(varRef.frameId,"f").func
       local i = 1
       while true do
-        local upname,oldvalue = debug.getupvalue(func,i)
+        local upname = debug.getupvalue(func,i)
         if not upname then break end
         if upname == name then
           local goodvalue,newvalue = __DebugAdapter.evaluateInternal(varRef.frameId+1,nil,"setvar",value)
@@ -833,21 +956,29 @@ function __DebugAdapter.setVariable(variablesReference, name, value, seq)
             print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,newvalue)}))
             return
           else
-            print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,oldvalue)}))
+            print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value=newvalue}}))
             return
           end
         end
         i = i + 1
       end
+      print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value="invalid upval name"}}))
+      return
     elseif varRef.type == "Table" or varRef.type == "LuaObject" then
       -- special names "[]" and others aren't valid lua so it won't parse anyway
       local goodname,newname = __DebugAdapter.evaluateInternal(nil,nil,"setvar",name)
       if goodname then
         local alsoLookIn = varRef.object or varRef.table
         local goodvalue,newvalue = __DebugAdapter.evaluateInternal(nil,alsoLookIn,"setvar",value)
-        if goodvalue then
-          -- this could fail if table has __newindex or LuaObject property is read only or wrong type, etc
-          pcall(function() alsoLookIn[newname] = newvalue end)
+        if not goodvalue then
+          print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value=newvalue}}))
+          return
+        end
+        -- this could fail if table has __newindex or LuaObject property is read only or wrong type, etc
+        local goodassign,mesg = pcall(function() alsoLookIn[newname] = newvalue end)
+        if not goodassign then
+          print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value=mesg}}))
+          return
         end
 
         -- it could even fail silently, or coerce the value to another type,
@@ -855,6 +986,9 @@ function __DebugAdapter.setVariable(variablesReference, name, value, seq)
         -- also, refresh the value even if we didn't update it
         local _,resultvalue = pcall(function() return alsoLookIn[newname] end)
         print("DBGsetvar: " .. json.encode({seq = seq, body = variables.create(nil,resultvalue)}))
+        return
+      else
+        print("DBGsetvar: " .. json.encode({seq = seq, body = {type="error",value="invalid property name"}}))
         return
       end
     end

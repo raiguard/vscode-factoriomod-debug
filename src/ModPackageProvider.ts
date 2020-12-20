@@ -5,12 +5,11 @@ import * as path from 'path';
 import * as Git from './git';
 import * as WebRequest from 'web-request';
 import * as semver from 'semver';
+import * as archiver from 'archiver';
 import { jar } from 'request';
 import { spawn } from 'child_process';
 import { BufferSplitter } from './BufferSplitter';
 import { ModManager } from './ModManager';
-
-let archiver = require('archiver');
 
 interface ModPackageScripts {
 	compile?: string
@@ -19,9 +18,11 @@ interface ModPackageScripts {
 	version?: string
 	prepublish?: string
 	publish?: string
+	postpublish?: string
 };
 
 export interface ModInfo {
+	// actual Factorio fields:
 	name: string
 	version: string
 	factorio_version: string
@@ -31,6 +32,8 @@ export interface ModInfo {
 	contact: string
 	description: string
 	dependencies: string[]
+
+	// my extensions for packaging:
 	package?: {
 		ignore?: string[]
 		no_git_push?: boolean
@@ -50,68 +53,67 @@ interface AdjustModsDefinition extends vscode.TaskDefinition {
 }
 
 export class ModTaskProvider implements vscode.TaskProvider{
-	private readonly modPackages: Map<string, ModPackage>;
+	constructor(context: vscode.ExtensionContext, private readonly modPackages: Map<string, ModPackage>) {}
 
-	constructor(context: vscode.ExtensionContext, modPackages: Map<string, ModPackage>) {
-		this.modPackages = modPackages;
-	}
+
 	provideTasks(token?: vscode.CancellationToken | undefined): vscode.ProviderResult<vscode.Task[]> {
-		let tasks:vscode.Task[] = [];
+		const tasks:vscode.Task[] = [];
 
-		this.modPackages.forEach((mp,uri) => {
-			if (mp.scripts?.compile)
+		const latest = ModPackage.latestPackages(this.modPackages.values());
+		for (const modpackage of this.modPackages.values()) {
+			if (!latest.has(modpackage)){continue;}
+			if (modpackage.scripts?.compile)
 			{
 				tasks.push(new vscode.Task(
-					{label:`${mp.label}.compile`,type:"factorio",modname:mp.label,command:"compile"},
-					vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-					`${mp.label}.compile`,
+					{label:`${modpackage.label}.compile`,type:"factorio",modname:modpackage.label,command:"compile"},
+					vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+					`${modpackage.label}.compile`,
 					"factorio",
-					mp.CompileTask(),
+					modpackage.CompileTask(),
 					[]
 				));
 			}
 			tasks.push(new vscode.Task(
-				{label:`${mp.label}.datestamp`,type:"factorio",modname:mp.label,command:"datestamp"},
-				vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-				`${mp.label}.datestamp`,
+				{label:`${modpackage.label}.datestamp`,type:"factorio",modname:modpackage.label,command:"datestamp"},
+				vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+				`${modpackage.label}.datestamp`,
 				"factorio",
-				mp.DateStampTask(),
+				modpackage.DateStampTask(),
 				[]
 			));
 			tasks.push(new vscode.Task(
-				{label:`${mp.label}.package`,type:"factorio",modname:mp.label,command:"package"},
-				vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-				`${mp.label}.package`,
+				{label:`${modpackage.label}.package`,type:"factorio",modname:modpackage.label,command:"package"},
+				vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+				`${modpackage.label}.package`,
 				"factorio",
-				mp.PackageTask(),
+				modpackage.PackageTask(),
 				[]
 			));
 			tasks.push(new vscode.Task(
-				{label:`${mp.label}.version`,type:"factorio",modname:mp.label,command:"version"},
-				vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-				`${mp.label}.version`,
+				{label:`${modpackage.label}.version`,type:"factorio",modname:modpackage.label,command:"version"},
+				vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+				`${modpackage.label}.version`,
 				"factorio",
-				mp.IncrementTask(),
+				modpackage.IncrementTask(),
 				[]
 			));
 			tasks.push(new vscode.Task(
-				{label:`${mp.label}.upload`,type:"factorio",modname:mp.label,command:"upload"},
-				vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-				`${mp.label}.upload`,
+				{label:`${modpackage.label}.upload`,type:"factorio",modname:modpackage.label,command:"upload"},
+				vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+				`${modpackage.label}.upload`,
 				"factorio",
-				mp.PostToPortalTask(),
+				modpackage.PostToPortalTask(),
 				[]
 			));
 			tasks.push(new vscode.Task(
-				{label:`${mp.label}.publish`,type:"factorio",modname:mp.label,command:"publish"},
-				vscode.workspace.getWorkspaceFolder(mp.resourceUri) || vscode.TaskScope.Workspace,
-				`${mp.label}.publish`,
+				{label:`${modpackage.label}.publish`,type:"factorio",modname:modpackage.label,command:"publish"},
+				vscode.workspace.getWorkspaceFolder(modpackage.resourceUri) || vscode.TaskScope.Workspace,
+				`${modpackage.label}.publish`,
 				"factorio",
-				mp.PublishTask(),
+				modpackage.PublishTask(),
 				[]
 			));
-
-		},this);
+		};
 
 		return tasks;
 	}
@@ -119,69 +121,100 @@ export class ModTaskProvider implements vscode.TaskProvider{
 	resolveTask(task: vscode.Task, token?: vscode.CancellationToken | undefined): vscode.ProviderResult<vscode.Task> {
 		if (task.definition.type === "factorio")
 		{
+			let execution:vscode.CustomExecution|undefined;
 			if (task.definition.command === "adjustMods")
 			{
-				if (!task.definition.adjustMods) { return undefined; }
-				if (!task.definition.modsPath) { return undefined; }
-				return new vscode.Task(
-					task.definition,
-					task.scope || vscode.TaskScope.Workspace,
-					task.name,
-					task.source,
-					this.AdjustModsTask(<AdjustModsDefinition>task.definition),
-					[]
-				);
+				if (!task.definition.adjustMods)
+				{
+					execution = this.ConfigErrorTask(task.definition,"missing `adjustMods`");
+				}
+				else if (!task.definition.modsPath)
+				{
+					execution = this.ConfigErrorTask(task.definition,"missing `modsPath`");
+				}
+				else
+				{
+					execution = this.AdjustModsTask(<AdjustModsDefinition>task.definition);
+				}
 			}
 			else
 			{
-				if (!task.definition.modname) { return undefined; }
-				for (const modpackage of this.modPackages.values()) {
-					if (modpackage.label === task.definition.modname) {
-						const mp = modpackage;
-						let execution:vscode.CustomExecution;
-						switch (task.definition.command) {
-							case "compile":
-								execution = mp.CompileTask();
-								break;
-							case "datestamp":
-								execution = mp.DateStampTask();
-								break;
-							case "package":
-								execution = mp.PackageTask();
-								break;
-							case "version":
-								execution = mp.IncrementTask();
-								break;
-							case "upload":
-								execution = mp.PostToPortalTask();
-								break;
-							case "publish":
-								execution = mp.PublishTask();
-								break;
-							default:
-								return undefined;
+				if (!task.definition.modname)
+				{
+					execution = this.ConfigErrorTask(task.definition,"missing `modname`");
+				}
+				else
+				{
+					const latest = ModPackage.latestPackages(this.modPackages.values());
+					for (const modpackage of this.modPackages.values()) {
+						if (modpackage.label === task.definition.modname && latest.has(modpackage)) {
+							const mp = modpackage;
+							switch (task.definition.command) {
+								case "compile":
+									execution = mp.CompileTask();
+									break;
+								case "datestamp":
+									execution = mp.DateStampTask();
+									break;
+								case "package":
+									execution = mp.PackageTask();
+									break;
+								case "version":
+									execution = mp.IncrementTask();
+									break;
+								case "upload":
+									execution = mp.PostToPortalTask();
+									break;
+								case "publish":
+									execution = mp.PublishTask();
+									break;
+								default:
+									execution = this.ConfigErrorTask(task.definition,`unknown \`command\` "${task.definition.command}"`);
+							}
+							break;
 						}
-						return new vscode.Task(
-							task.definition,
-							task.scope || vscode.TaskScope.Workspace,
-							task.name,
-							task.source,
-							execution,
-							[]
-						);
+					}
+					if (!execution)
+					{
+						execution = this.ConfigErrorTask(task.definition,`mod "${task.definition.modname}" not found`);
 					}
 				}
 			}
+			return new vscode.Task(
+				task.definition,
+				task.scope || vscode.TaskScope.Workspace,
+				task.name,
+				task.source,
+				execution,
+				[]);
 		}
 		return undefined;
 	}
 
+	private async ConfigError(term:ModTaskTerminal,def:vscode.TaskDefinition,error:string): Promise<void>
+	{
+		term.write(error+"\n");
+		term.write(JSON.stringify(def,undefined,2));
+	}
+
+	private ConfigErrorTask(def:vscode.TaskDefinition,error:string): vscode.CustomExecution
+	{
+		return new vscode.CustomExecution(async ()=>{
+			return new ModTaskPseudoterminal(async term =>{
+				await this.ConfigError(term,def,error);
+				term.close();
+			});
+		});
+	}
 
 	private async AdjustMods(term:ModTaskTerminal,def:AdjustModsDefinition): Promise<void>
 	{
+		def.modsPath = def.modsPath.replace(/\\/g,"/");
+		term.write(`Using modsPath ${def.modsPath}\n`);
 		const manager = new ModManager(def.modsPath);
 		if (!def.allowDisableBaseMod) {def.adjustMods["base"] = true;}
 		if (def.disableExtraMods) {
+			term.write(`All Mods disabled\n`);
 			manager.disableAll();
 		}
 		for (const mod in def.adjustMods) {
@@ -189,9 +222,18 @@ export class ModTaskProvider implements vscode.TaskProvider{
 			{
 				const adjust = def.adjustMods[mod];
 				manager.set(mod,adjust);
+				term.write(`${mod} ${
+					adjust === true ? "enabled" :
+					adjust === false ? "disabled" :
+					"enabled version " + adjust
+				}\n`);
 			}
 		}
-		manager.write();
+		try {
+			manager.write();
+		} catch (error) {
+			term.write(`Failed to save mod list:\n${error}\n`);
+		}
 	}
 
 	private AdjustModsTask(def:AdjustModsDefinition): vscode.CustomExecution
@@ -208,23 +250,21 @@ export class ModTaskProvider implements vscode.TaskProvider{
 export class ModPackage extends vscode.TreeItem {
 	public label: string; // used as modname
 	public description: string; // used as modversion
-	public resourceUri: vscode.Uri;
 	public packageIgnore?: string[];
 	public noGitPush?: boolean;
 	public gitPublishBranch?: string|null;
 	public noPortalUpload?: boolean;
 	public scripts?: ModPackageScripts;
 
-	constructor(uri: vscode.Uri, modscript: ModInfo) {
-		super(uri);
+	constructor(public readonly resourceUri: vscode.Uri, modscript: ModInfo) {
+		super(resourceUri);
 		this.label = modscript.name;
 		this.description = modscript.version;
 		this.tooltip = modscript.title;
-		this.contextValue = "factoriomodpackage";
 		this.command = {
 			title: 'Open',
 			command: 'vscode.open',
-			arguments: [uri]
+			arguments: [resourceUri]
 		};
 		//this.id = modscript.name;
 		this.packageIgnore = modscript.package?.ignore;
@@ -232,6 +272,40 @@ export class ModPackage extends vscode.TreeItem {
 		this.gitPublishBranch = modscript.package?.git_publish_branch;
 		this.noPortalUpload = modscript.package?.no_portal_upload;
 		this.scripts = modscript.package?.scripts;
+	}
+
+	public static sort(a:ModPackage,b:ModPackage)
+	{
+		const namecomp = a.label.toLowerCase().localeCompare(b.label.toLowerCase());
+		if (namecomp !== 0) {return namecomp * 100;}
+
+		const vercomp = semver.compare(a.description,b.description);
+		if (vercomp !== 0) {return -vercomp * 10;}
+
+		if (a.resourceUri<b.resourceUri) {return -1;}
+		if (a.resourceUri>b.resourceUri) {return  1;}
+
+		return 0;
+	}
+
+	public static latestPackages(packages:IterableIterator<ModPackage>)
+	{
+		const byModName = new Map<string,ModPackage[]>();
+		for (const mp of packages) {
+			if (byModName.has(mp.label))
+			{
+				byModName.get(mp.label)!.push(mp);
+			}
+			else
+			{
+				byModName.set(mp.label,[mp]);
+			}
+		}
+		const latest = new Set<ModPackage>();
+		for (const mps of byModName.values()) {
+			latest.add(mps.reduce((a,b)=>(semver.compare(a.description,b.description) < 0) ? b : a));
+		}
+		return latest;
 	}
 
 	public async Update()
@@ -256,7 +330,7 @@ export class ModPackage extends vscode.TreeItem {
 		{
 			term.write(`Compiling: ${this.resourceUri} ${this.description}\r\n`);
 
-			let code = await runScript(term, "compile", this.scripts.compile, moddir,
+			const code = await runScript(term, "compile", this.scripts.compile, moddir,
 				{ FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:this.description });
 			if (code !== 0) {return;}
 		}
@@ -273,20 +347,20 @@ export class ModPackage extends vscode.TreeItem {
 		});
 	}
 
-	private async DateStampChangelog(term:ModTaskTerminal): Promise<boolean>
+	private async DateStampChangelog(term:ModTaskTerminal): Promise<boolean|number>
 	{
 		const moddir = path.dirname(this.resourceUri.fsPath);
 		const changelogpath = path.join(moddir, "changelog.txt");
 		if(fs.existsSync(changelogpath))
 		{
 			//datestamp current section
-			let changelogdoc = await vscode.workspace.openTextDocument(changelogpath);
-			let syms = <vscode.DocumentSymbol[]>await vscode.commands.executeCommand<(vscode.SymbolInformation|vscode.DocumentSymbol)[]>("vscode.executeDocumentSymbolProvider", changelogdoc.uri);
-			let current = syms?.find(sym=>sym.name.startsWith(this.description))!;
+			const changelogdoc = await vscode.workspace.openTextDocument(changelogpath);
+			const syms = <vscode.DocumentSymbol[]>await vscode.commands.executeCommand<(vscode.SymbolInformation|vscode.DocumentSymbol)[]>("vscode.executeDocumentSymbolProvider", changelogdoc.uri);
+			const current = syms?.find(sym=>sym.name.startsWith(this.description))!;
 			if (current)
 			{
-				let date = current.children.find(sym=>sym.name === "Date");
-				let we = new vscode.WorkspaceEdit();
+				const date = current.children.find(sym=>sym.name === "Date");
+				const we = new vscode.WorkspaceEdit();
 				if (date)
 				{
 					we.replace(changelogdoc.uri,date.selectionRange, new Date().toISOString().substr(0,10));
@@ -304,8 +378,9 @@ export class ModPackage extends vscode.TreeItem {
 				term.write(`No Changelog section for ${this.description}\r\n`);
 			}
 			if (this.scripts?.datestamp) {
-				await runScript(term, "datestamp", this.scripts.datestamp, moddir,
+				const code = await runScript(term, "datestamp", this.scripts.datestamp, moddir,
 					{ FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:this.description });
+				if (code !== 0){ return code; }
 			}
 			return true;
 		}
@@ -313,8 +388,9 @@ export class ModPackage extends vscode.TreeItem {
 		{
 			term.write(`No Changelog found\r\n`);
 			if (this.scripts?.datestamp) {
-				await runScript(term, "datestamp", this.scripts.datestamp, moddir,
+				const code = await runScript(term, "datestamp", this.scripts.datestamp, moddir,
 					{ FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:this.description });
+				if (code !== 0){ return code; }
 			}
 			return false;
 		}
@@ -331,6 +407,19 @@ export class ModPackage extends vscode.TreeItem {
 		});
 	}
 
+	public static async BuildZip(moddir:string,packagepath:string,ignore:string[],name:string,version:string): Promise<number>
+	{
+		const zipoutput = fs.createWriteStream(packagepath);
+		const archive = archiver('zip', { zlib: { level: 9 }});
+		archive.pipe(zipoutput);
+		archive.glob("**",{ cwd: moddir, root: moddir, nodir: true, ignore: ignore },{ prefix: `${name}_${version}` });
+		const bytesWritten = new Promise<number>((resolve,reject)=>{
+			zipoutput.on("close",()=>resolve(archive.pointer()));
+			archive.finalize();
+		});
+		return bytesWritten;
+	}
+
 	private async Package(term:ModTaskTerminal): Promise<string|undefined>
 	{
 		const config = vscode.workspace.getConfiguration(undefined,this.resourceUri);
@@ -340,7 +429,7 @@ export class ModPackage extends vscode.TreeItem {
 		const moddir = path.dirname(this.resourceUri.fsPath);
 		if(this.scripts?.prepackage)
 		{
-			let code = await runScript(term, "prepackage", this.scripts.prepackage, moddir,
+			const code = await runScript(term, "prepackage", this.scripts.prepackage, moddir,
 				{ FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:this.description });
 			if (code !== 0) {return;}
 		}
@@ -355,14 +444,9 @@ export class ModPackage extends vscode.TreeItem {
 		}
 
 		const packagepath = path.join(packagebase, `${this.label}_${this.description}.zip`);
-		let zipoutput = fs.createWriteStream(packagepath);
-		let archive = archiver('zip', { zlib: { level: 9 }});
-		archive.pipe(zipoutput);
-		archive.glob("**",{ cwd: moddir, root: moddir, nodir: true, ignore: [`**/${this.label}_*.zip`].concat(this.packageIgnore||[]) },{ prefix: `${this.label}_${this.description}` });
-		let bytesWritten = await new Promise((resolve,reject)=>{
-			zipoutput.on("close",()=>resolve(archive.pointer()));
-			archive.finalize();
-		});
+
+		const ignore = [`**/${this.label}_*.zip`].concat(this.packageIgnore||[]);
+		const bytesWritten = await ModPackage.BuildZip(moddir,packagepath,ignore,this.label,this.description);
 		term.write(`Built ${this.label}_${this.description}.zip ${bytesWritten} bytes\r\n`);
 		return packagepath;
 	}
@@ -381,7 +465,7 @@ export class ModPackage extends vscode.TreeItem {
 
 	private async IncrementVersion(term:ModTaskTerminal): Promise<string|undefined>
 	{
-		let we = new vscode.WorkspaceEdit();
+		const we = new vscode.WorkspaceEdit();
 		// increment info.json version
 		const infodoc = await vscode.workspace.openTextDocument(this.resourceUri);
 		const syms = await vscode.commands.executeCommand<(vscode.SymbolInformation|vscode.DocumentSymbol)[]>
@@ -394,7 +478,7 @@ export class ModPackage extends vscode.TreeItem {
 		}
 
 		const newversion = semver.inc(this.description,'patch')!;
-		let version = syms.find(sym=>sym.name === "version")!;
+		const version = syms.find(sym=>sym.name === "version")!;
 
 		we.replace(this.resourceUri,
 			version instanceof vscode.SymbolInformation ? version.location.range : version.selectionRange,
@@ -443,7 +527,7 @@ export class ModPackage extends vscode.TreeItem {
 	{
 		// upload to portal
 		// TS says this type doesn't work, but it really does...
-		let cookiejar = <WebRequest.CookieJar><unknown>jar();
+		const cookiejar = <WebRequest.CookieJar><unknown>jar();
 		try {
 			const loginform = await WebRequest.get("https://factorio.com/login?mods=1&next=%2Ftrending",{jar:cookiejar});
 			const logintoken = ((loginform.content.match(/<input [^>]+"csrf_token"[^>]+>/)||[])[0]?.match(/value="([^"]*)"/)||[])[1];
@@ -508,7 +592,7 @@ export class ModPackage extends vscode.TreeItem {
 			return false;
 		}
 
-		let uploadresultjson = JSON.parse(uploadresult.content);
+		const uploadresultjson = JSON.parse(uploadresult.content);
 
 		try {
 			const postresult = await WebRequest.post(`https://mods.factorio.com/mod/${this.label}/downloads/edit`, {
@@ -527,7 +611,7 @@ export class ModPackage extends vscode.TreeItem {
 			}
 			else
 			{
-				let message = postresult.content.match(/category:\s*'error',\s*\n\s*message:\s*'([^']*)'/)![1];
+				const message = postresult.content.match(/category:\s*'error',\s*\n\s*message:\s*'([^']*)'/)![1];
 				throw message;
 			}
 		} catch (error) {
@@ -543,7 +627,17 @@ export class ModPackage extends vscode.TreeItem {
 		return new vscode.CustomExecution(async ()=>{
 			return new ModTaskPseudoterminal(async term =>{
 				await this.Update();
-				const moddir = this.resourceUri.with({path: path.posix.dirname(this.resourceUri.path)});
+				const config = vscode.workspace.getConfiguration(undefined,this.resourceUri);
+				let packagebase = path.dirname(this.resourceUri.path);
+				switch (config.get<string>("factorio.package.zipLocation","inside")) {
+					case "outside":
+						packagebase = path.dirname(packagebase);
+						break;
+					case "inside":
+					default:
+						break;
+				}
+				const moddir = this.resourceUri.with({path: packagebase});
 				const direntries = await vscode.workspace.fs.readDirectory(moddir);
 				const packages = direntries.filter(([name,type])=>{
 					return type === vscode.FileType.File && name.startsWith(this.label) && name.match(/_\d+\.\d+\.\d+\.zip$/);
@@ -572,7 +666,7 @@ export class ModPackage extends vscode.TreeItem {
 		const config = vscode.workspace.getConfiguration(undefined,this.resourceUri);
 
 		const packageversion = this.description;
-
+		let branchname:string = "master";
 		if (repo)
 		{
 			// throw if uncommitted changes
@@ -581,9 +675,13 @@ export class ModPackage extends vscode.TreeItem {
 				term.write("Cannot Publish with uncommitted changes\r\n");
 				return;
 			}
-			if (this.gitPublishBranch !== null)
+			if (this.gitPublishBranch === null)
 			{
-				const branchname = this.gitPublishBranch ?? "master";
+				branchname = repo.state.HEAD?.name!;
+			}
+			else
+			{
+				branchname = this.gitPublishBranch ?? "master";
 				// throw if not on master
 				if (repo.state.HEAD?.name !== branchname)
 				{
@@ -599,11 +697,12 @@ export class ModPackage extends vscode.TreeItem {
 
 		if(this.scripts?.prepublish)
 		{
-			let code = await runScript(term, "prepublish", this.scripts.prepublish, moddir, { FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:packageversion });
+			const code = await runScript(term, "prepublish", this.scripts.prepublish, moddir, { FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:packageversion });
 			if (code !== 0) {return;}
 		}
 
-		let haschangelog = await this.DateStampChangelog(term);
+		const haschangelog = await this.DateStampChangelog(term);
+		if (typeof haschangelog === "number") {return;}
 
 		let tagname:string;
 		if (repo)
@@ -622,20 +721,19 @@ export class ModPackage extends vscode.TreeItem {
 			}
 			let tagmessage = config.get<string>("factorio.package.tagMessage");
 			tagmessage = tagmessage?.replace(/\$VERSION/g,packageversion).replace(/\$MODNAME/g,this.label);
-			const tagarg = tagmessage ? "-F -" : "-m \"\"";
-			await runScript(term, undefined, `git tag -a ${tagname} ${tagarg}`, moddir,undefined,tagmessage);
+			await runScript(term, undefined, `git tag -a ${tagname} -F -`, moddir,undefined,tagmessage);
 		}
 
 		// build zip with <factorio.package>
 		const packagepath = await this.Package(term);
 		if (!packagepath) {return;}
 
-		let newversion = await this.IncrementVersion(term);
+		const newversion = await this.IncrementVersion(term);
 		if (!newversion) {return;}
 
 		if(this.scripts?.publish)
 		{
-			let code = await runScript(term, "publish", this.scripts.publish, moddir, { FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:packageversion });
+			const code = await runScript(term, "publish", this.scripts.publish, moddir, { FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:packageversion });
 			if (code !== 0) {return;}
 		}
 
@@ -654,22 +752,28 @@ export class ModPackage extends vscode.TreeItem {
 				const upstream = repo?.state.HEAD?.upstream;
 				if (upstream)
 				{
-					await runScript(term, undefined, `git push ${upstream.remote} master ${tagname!}`, moddir);
+					await runScript(term, undefined, `git push ${upstream.remote} ${branchname} ${tagname!}`, moddir);
 				}
 				else
 				{
-					term.write(`no remote set as upstream on master\r\n`);
+					term.write(`no remote set as upstream on ${branchname}\r\n`);
 				}
 			}
 		}
-		if(!this.noPortalUpload)
-			{
-				if(await this.PostToPortal(packagepath, packageversion, term) &&
-					config.get<boolean>("factorio.package.removeZipAfterPublish",false))
-				{
-					fs.unlinkSync(packagepath);
-				}
-			}
+		if(!this.noPortalUpload && ! await this.PostToPortal(packagepath, packageversion, term))
+		{
+			return;
+		}
+
+		if(this.scripts?.postpublish)
+		{
+			const code = await runScript(term, "postpublish", this.scripts.postpublish, moddir, { FACTORIO_MODNAME:this.label, FACTORIO_MODVERSION:packageversion, FACTORIO_MODPACKAGE:packagepath });
+			if (code !== 0) {return;}
+		}
+		if (config.get<boolean>("factorio.package.removeZipAfterPublish",false))
+		{
+			fs.unlinkSync(packagepath);
+		}
 	}
 
 	public PublishTask(): vscode.CustomExecution
@@ -684,16 +788,16 @@ export class ModPackage extends vscode.TreeItem {
 	}
 }
 export class ModsTreeDataProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
-	private _onDidChangeTreeData: vscode.EventEmitter<vscode.TreeItem | undefined> = new vscode.EventEmitter<vscode.TreeItem | undefined>();
+	private readonly _onDidChangeTreeData: vscode.EventEmitter<vscode.TreeItem | undefined> = new vscode.EventEmitter<vscode.TreeItem | undefined>();
 	readonly onDidChangeTreeData: vscode.Event<vscode.TreeItem | undefined> = this._onDidChangeTreeData.event;
 
-	private modPackages: Map<string, ModPackage>;
+	private readonly modPackages: Map<string, ModPackage>;
 	constructor(context: vscode.ExtensionContext) {
 		const subscriptions = context.subscriptions;
 
 		this.modPackages = new Map<string, ModPackage>();
 		vscode.workspace.findFiles('**/info.json').then(infos => { infos.forEach(this.updateInfoJson, this); });
-		let infoWatcher = vscode.workspace.createFileSystemWatcher('**/info.json');
+		const infoWatcher = vscode.workspace.createFileSystemWatcher('**/info.json');
 		infoWatcher.onDidChange(this.updateInfoJson, this);
 		infoWatcher.onDidCreate(this.updateInfoJson, this);
 		infoWatcher.onDidDelete(this.removeInfoJson, this);
@@ -702,36 +806,52 @@ export class ModsTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
 		context.subscriptions.push(vscode.tasks.registerTaskProvider("factorio",new ModTaskProvider(context, this.modPackages)));
 
 		context.subscriptions.push(
+			vscode.commands.registerCommand("factorio.openchangelog",async (mp:ModPackage) => {
+				try {
+					vscode.window.showTextDocument(vscode.Uri.joinPath(mp.resourceUri,"../changelog.txt"));
+				} catch (error) {
+					vscode.window.showErrorMessage(error);
+				}
+			}));
+
+		context.subscriptions.push(
+			vscode.commands.registerCommand("factorio.compile",async (mp:ModPackage) => {
+				const compiletask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+					t.definition.command = "compile" && t.definition.modname === mp.label)!;
+				await vscode.tasks.executeTask(compiletask);
+			}));
+
+		context.subscriptions.push(
 			vscode.commands.registerCommand("factorio.datestamp",async (mp:ModPackage) => {
-				let datestamptask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+				const datestamptask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
 					t.definition.command = "datestamp" && t.definition.modname === mp.label)!;
 				await vscode.tasks.executeTask(datestamptask);
 			}));
 
 		context.subscriptions.push(
 			vscode.commands.registerCommand("factorio.package",async (mp:ModPackage) => {
-				let packagetask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+				const packagetask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
 					t.definition.command === "package" && t.definition.modname === mp.label)!;
 				await vscode.tasks.executeTask(packagetask);
 			}));
 
 		context.subscriptions.push(
 			vscode.commands.registerCommand("factorio.version",async (mp:ModPackage) => {
-				let versiontask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+				const versiontask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
 					t.definition.command === "version" && t.definition.modname === mp.label)!;
 				await vscode.tasks.executeTask(versiontask);
 			}));
 
 		context.subscriptions.push(
 			vscode.commands.registerCommand("factorio.upload",async (mp:ModPackage) => {
-				let uploadtask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+				const uploadtask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
 					t.definition.command === "upload" && t.definition.modname === mp.label)!;
 				await vscode.tasks.executeTask(uploadtask);
 			}));
 
 		context.subscriptions.push(
 			vscode.commands.registerCommand("factorio.publish",async (mp:ModPackage) => {
-				let publishtask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
+				const publishtask = (await vscode.tasks.fetchTasks({type:"factorio"})).find(t=>
 					t.definition.command === "publish" && t.definition.modname === mp.label)!;
 				await vscode.tasks.executeTask(publishtask);
 
@@ -742,7 +862,7 @@ export class ModsTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
 		{
 			const infodoc = await vscode.workspace.openTextDocument(uri);
 			const modscript: ModInfo = JSON.parse(infodoc.getText());
-			if (modscript.name) {
+			if (modscript && modscript.name) {
 				if (this.modPackages.has(uri.toString())) {
 					await this.modPackages.get(uri.toString())?.Update();
 				}
@@ -767,29 +887,51 @@ export class ModsTreeDataProvider implements vscode.TreeDataProvider<vscode.Tree
 	getTreeItem(element: vscode.TreeItem): vscode.TreeItem | Thenable<vscode.TreeItem> {
 		return element;
 	}
-	getChildren(element?: vscode.TreeItem | undefined): vscode.ProviderResult<vscode.TreeItem[]> {
+	async getChildren(element?: vscode.TreeItem | undefined): Promise<vscode.TreeItem[]> {
 		if (!element) {
-			let items: vscode.TreeItem[] = [];
+			const items: vscode.TreeItem[] = [];
 			if (this.modPackages) {
-				this.modPackages.forEach((modscript, uri) => {
-					items.push(modscript);
-				});
+				const latest = ModPackage.latestPackages(this.modPackages.values());
+				for (const modscript of this.modPackages.values()) {
+					if (latest.has(modscript)) {
+						items.push(modscript);
+						const context = ["latest"];
+						if (modscript.scripts?.compile){
+							context.push("hascompile");
+						}
+						try {
+							await vscode.workspace.fs.stat(vscode.Uri.joinPath(modscript.resourceUri,"../changelog.txt"));
+							context.push("haschangelog");
+						} catch (error) {}
+
+						modscript.contextValue = context.join(" ");
+						modscript.collapsibleState = (()=>{
+							for (const other of this.modPackages.values()) {
+								if (modscript.label === other.label && !latest.has(other)){
+									return vscode.TreeItemCollapsibleState.Collapsed;
+								}
+							}
+							return vscode.TreeItemCollapsibleState.None;
+						})();
+					}
+				}
 			}
-			return items.sort((a:ModPackage,b:ModPackage)=>{
-				const namecomp = a.label.toLowerCase().localeCompare(b.label.toLowerCase());
-				if (namecomp !== 0) {return namecomp * 100;}
-
-				const vercomp = semver.compare(a.description,b.description);
-				if (vercomp !== 0) {return vercomp * 10;}
-
-				if (a.resourceUri<b.resourceUri) {return -1;}
-				if (a.resourceUri>b.resourceUri) {return  1;}
-
-				return 0;
-			});
+			return items.sort(ModPackage.sort);
 		}
 		else if (element instanceof ModPackage) {
-			return [];
+			const items: vscode.TreeItem[] = [];
+			if (this.modPackages) {
+				const latest = ModPackage.latestPackages(this.modPackages.values());
+				if (latest.has(element)) {
+					this.modPackages.forEach((modscript, uri) => {
+						if (modscript.label === element.label && !latest.has(modscript)) {
+							items.push(modscript);
+							modscript.contextValue = "older";
+						}
+					});
+				}
+			}
+			return items.sort(ModPackage.sort);
 		}
 		else {
 			return [];
@@ -882,21 +1024,19 @@ async function runScript(term:ModTaskTerminal, name:string|undefined, command:st
 }
 
 class ModTaskPseudoterminal implements vscode.Pseudoterminal {
-	private writeEmitter = new vscode.EventEmitter<string>();
+	private readonly writeEmitter = new vscode.EventEmitter<string>();
 	onDidWrite: vscode.Event<string> = this.writeEmitter.event;
-	private closeEmitter = new vscode.EventEmitter<void>();
+	private readonly closeEmitter = new vscode.EventEmitter<void>();
 	onDidClose?: vscode.Event<void> = this.closeEmitter.event;
-	private tokensource = new vscode.CancellationTokenSource();
+	private readonly tokensource = new vscode.CancellationTokenSource();
 
-	constructor(
-		private runner:(term:ModTaskTerminal,token?:vscode.CancellationToken)=>void|Promise<void>) {
-	}
+	constructor(private readonly runner:(term:ModTaskTerminal,token?:vscode.CancellationToken)=>void|Promise<void>) {}
 
 	async open(initialDimensions: vscode.TerminalDimensions | undefined): Promise<void> {
-		let writeEmitter = this.writeEmitter;
-		let closeEmitter = this.closeEmitter;
+		const writeEmitter = this.writeEmitter;
+		const closeEmitter = this.closeEmitter;
 		await this.runner({
-			write: (data) => writeEmitter.fire(data),
+			write: (data) => writeEmitter.fire(data.replace(/\r?\n/g,"\r\n")),
 			close: () => closeEmitter.fire()
 		}, this.tokensource.token);
 		closeEmitter.fire();

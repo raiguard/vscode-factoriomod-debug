@@ -90,6 +90,8 @@ All-in-one command.
   * commit "moved to version x.y.z"
   * push to git upstream, unless `info.json#/package/no_git_push` is set
   * upload to mod portal, unless `info.json#/package/no_portal_upload` is set
+  * run `info.json#/package/scripts/postpublish` if set, with extra environment variable `FACTORIO_MODPACKAGE` with the filename of the built zip.
+  * remove zip if `factorio.package.removeZipAfterPublish` is set
 
 ## JSON Validation
 
@@ -122,7 +124,7 @@ If normal breakpoints are unusable for some reason, you can call `__DebugAdapter
 
 ## Custom Debug Views
 
-When displaying tables in the Variables window, the debugger will check for metatables, and display them as a special member `<metatable>`. The default lineitem for a table can be overridden by the metamethod `__debugline`, which can be either a string (with expressions in `{}` interpolated) or a function which takes the table as an argument and returns a string. The contents of the table can be overridden by the `__debugchildren` metamethod, which can be `false` to disable expanding children or a function which takes the table as an argument and returns `DebugAdapter.Variable[]`.
+When displaying tables in the Variables window, the debugger will check for metatables, and display them as a special member `<metatable>`. The default lineitem for a table can be overridden by the metamethod `__debugline`, which can be either a string (with expressions in `{}` interpolated) or a function which takes the table as an argument and returns a string. The typename for a table can be overridden by a string in the metatable field `__debugtype`. The contents of the table can be overridden by the `__debugchildren` metamethod, which can be `false` to disable expanding children or a function which takes the table as an argument and returns `DebugAdapter.Variable[]`.
 
 The `variables` module can be used to prepare custom expansions.
 ```lua

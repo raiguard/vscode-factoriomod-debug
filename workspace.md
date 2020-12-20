@@ -13,6 +13,8 @@ I open the Factorio `mods` directory as the root of my workspace in VSCode, and 
     * `modname/`
       * `.git/...`
       * `info.json`
+      * `control.lua`
+      * `data.lua`
       * ...
     * `anothermod/`
       * ...
@@ -44,6 +46,7 @@ In addition to these, you'll want a little configuration to tell your Lua Langua
     "rendering",
     "global",
     "log",
+    "localised_print",
     "defines",
     "data", /* data */
     "mods", /* data */
@@ -65,4 +68,10 @@ In addition to these, you'll want a little configuration to tell your Lua Langua
     /* Adjust this to match your Factorio install path */
     "D:/factorio/factoriogit/data/core/lualib": true,
   },
+```
+
+If using tasks, you may want to use git-bash as your automation shell:
+
+```jsonc
+  "terminal.integrated.automationShell.windows": "C:/Program Files/Git/usr/bin/bash.exe",
 ```

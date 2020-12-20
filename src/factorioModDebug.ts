@@ -2,7 +2,7 @@ import {
 	Logger, logger,
 	LoggingDebugSession,
 	StoppedEvent, OutputEvent,
-	Thread, Source, Module, ModuleEvent, InitializedEvent, StackFrame, Scope, Variable, Event, TerminatedEvent
+	Thread, Source, Module, ModuleEvent, InitializedEvent, Scope, Variable, Event, TerminatedEvent
 } from 'vscode-debugadapter';
 import { DebugProtocol } from 'vscode-debugprotocol';
 import * as path from 'path';
@@ -16,6 +16,7 @@ import { FactorioProcess } from './FactorioProcess';
 import { ModInfo } from './ModPackageProvider';
 import { assert } from 'console';
 import { ModManager } from './ModManager';
+import { ModSettings } from './ModSettings';
 
 interface ModPaths{
 	uri: vscode.Uri
@@ -49,8 +50,16 @@ interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
 	dataPath: string // path of `data` directory, always comes from config.ini
 	manageMod?: boolean
 	useInstrumentMode?: boolean
+	checkPrototypes?: boolean
+	checkEvents?: string[]|boolean
+	checkGlobals?: string[]|boolean
 	factorioArgs?: Array<string>
 	adjustMods?:{[key:string]:boolean|string}
+	adjustModSettings?:{
+		scope: "startup"|"runtime-global"|"runtime-per-user"
+		name: string
+		value?:boolean|number|string
+	}[]
 	disableExtraMods?:boolean
 	allowDisableBaseMod?:boolean
 	hookSettings?:boolean
@@ -62,6 +71,7 @@ interface LaunchRequestArguments extends DebugProtocol.LaunchRequestArguments {
 	keepOldLog?:boolean
 
 	runningBreak?:number
+	runningTimeout?:number
 
 	profileLines?:boolean
 	profileFuncs?:boolean
@@ -85,14 +95,16 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	private _configurationDone: resolver<void>;
 	private configDone: Promise<void>;
 
-	private breakPoints = new Map<string, DebugProtocol.SourceBreakpoint[]>();
-	private breakPointsChanged = new Set<string>();
+	private readonly breakPoints = new Map<string, DebugProtocol.SourceBreakpoint[]>();
+	private readonly breakPointsChanged = new Set<string>();
 
 	// unhandled only by default
-	private exceptionFilters = new Set<string>(["unhandled"]);
+	private readonly exceptionFilters = new Set<string>(["unhandled"]);
 
-	private _stack?: resolver<StackFrame[]>;
 	private readonly _modules = new Map<string,DebugProtocol.Module>();
+
+	private readonly _responses = new Map<number,DebugProtocol.Response>();
+
 	private readonly _scopes = new Map<number, resolver<Scope[]>>();
 	private readonly _vars = new Map<number, resolver<Variable[]>>();
 	private readonly _setvars = new Map<number, resolver<Variable>>();
@@ -113,7 +125,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	private profile?: Profile;
 
 	private workspaceModInfoReady:Promise<void>;
-	private workspaceModInfo = new Array<ModPaths>();
+	private readonly workspaceModInfo = new Array<ModPaths>();
 
 	/**
 	 * Creates a new debug adapter that is used for one debug session.
@@ -125,6 +137,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		// this debugger uses zero-based lines and columns
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
+		this.setDebuggerPathFormat("uri");
 
 		FactorioModDebugSession.output = FactorioModDebugSession.output || vscode.window.createOutputChannel("Factorio Mod Debug");
 		FactorioModDebugSession.output.appendLine("---------------------------------------------------------------------------------------------------");
@@ -309,9 +322,16 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		await this.workspaceModInfoReady;
 
 		args.factorioArgs = args.factorioArgs||[];
-		if(!args.noDebug && (args.useInstrumentMode ?? true))
+		if(!args.noDebug)
 		{
-			args.factorioArgs.push("--instrument-mod","debugadapter");
+			if (args.useInstrumentMode ?? true)
+			{
+				args.factorioArgs.push("--instrument-mod","debugadapter");
+			}
+			if((args.checkPrototypes ?? true) && !args.factorioArgs.includes("--check-unused-prototype-data"))
+			{
+				args.factorioArgs.push("--check-unused-prototype-data");
+			}
 		}
 
 		if (!args.configPathDetected)
@@ -329,6 +349,15 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		}
 
 		this.createSteamAppID(args.factorioPath);
+
+		if (args.adjustModSettings)
+		{
+			const settings = new ModSettings(fs.readFileSync(path.join(args.modsPath,"mod-settings.dat")));
+			for (const s of args.adjustModSettings) {
+				settings.set(s.scope,s.name,s.value);
+			}
+			fs.writeFileSync(path.join(args.modsPath,"mod-settings.dat"),settings.save());
+		}
 
 		this.factorio = new FactorioProcess(args.factorioPath,args.factorioArgs,args.nativeDebugger);
 
@@ -367,10 +396,12 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					//data/settings main chunk - force all breakpoints each time this comes up because it can only set them locally
 					await this.configDone;
 					this.clearQueuedStdin();
+					this.allocateRefBlock();
 					this.continue(true);
 				} else if (event === "on_parse") {
 					//control.lua main chunk - force all breakpoints each time this comes up because it can only set them locally
 					this.clearQueuedStdin();
+					this.allocateRefBlock();
 					this.continue(true);
 				} else if (event === "on_init") {
 					//if on_init, set initial breakpoints and continue
@@ -382,7 +413,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					this.continue(true);
 				} else if (event === "getref") {
 					//pass in nextref
-					this.writeStdin(`__DebugAdapter.transferRef(${this.nextRef++})`);
+					this.allocateRefBlock();
 					this.continue();
 					this.inPrompt = wasInPrompt;
 				} else if (event === "leaving" || event === "running") {
@@ -438,21 +469,21 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					this.clearQueuedStdin();
 					if (this.launchArgs.hookMode === "profile")
 					{
-						this.continueRequire(false);
+						this.continueRequire(false,"#settings");
 					}
 					else
 					{
-						this.continueRequire(this.launchArgs.hookSettings ?? false);
+						this.continueRequire(this.launchArgs.hookSettings ?? false,"#settings");
 					}
 				} else if (event === "on_instrument_data") {
 					this.clearQueuedStdin();
 					if (this.launchArgs.hookMode === "profile")
 					{
-						this.continueRequire(false);
+						this.continueRequire(false,"#data");
 					}
 					else
 					{
-						this.continueRequire(this.launchArgs.hookData ?? false);
+						this.continueRequire(this.launchArgs.hookData ?? false,"#data");
 					}
 				} else if (event.startsWith("on_instrument_control ")) {
 					this.clearQueuedStdin();
@@ -460,7 +491,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					const hookmods = this.launchArgs.hookControl ?? true;
 					const shouldhook =
 						// DA has to be specifically requested for hooks
-						modname === "debugadapter" ? typeof hookmods === "object" && hookmods.includes(modname) :
+						modname === "debugadapter" ? Array.isArray(hookmods) && hookmods.includes(modname) :
 						// everything else...
 						hookmods !== false && (hookmods === true || hookmods.includes(modname));
 					if (this.launchArgs.hookMode === "profile")
@@ -469,7 +500,18 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					}
 					else
 					{
-						this.continueRequire(shouldhook);
+						this.continueRequire(shouldhook,modname);
+					}
+				} else if (event === "on_da_control") {
+					const hookmods = this.launchArgs.hookControl ?? true;
+					const dahooked = ((Array.isArray(hookmods) && hookmods.includes("debugadapter")) || hookmods === false);
+					if (this.launchArgs.hookMode === "profile")
+					{
+						this.continueProfile(!dahooked);
+					}
+					else
+					{
+						this.continueRequire(false,"debugadapter");
 					}
 				} else {
 					// unexpected event?
@@ -498,7 +540,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 					body.output = this.translations.get(id) ?? `{Missing Translation ID ${id}}`;
 				}
 				const e:DebugProtocol.OutputEvent = new OutputEvent(body.output+"\n", body.category ?? "console");
-				if(body.variablesReference) {
+				if(vscode.workspace.getConfiguration().get<boolean>("factorio.debug.expandablePrint",false) && body.variablesReference) {
 					e.body.variablesReference = body.variablesReference;
 				}
 				if(body.source) {
@@ -509,8 +551,8 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 				}
 				this.sendEvent(e);
 			} else if (mesg.startsWith("DBGstack: ")) {
-				this._stack!(JSON.parse(mesg.substring(10).trim()));
-				this._stack = undefined;
+				const stackresult:{frames:DebugProtocol.StackFrame[];seq:number} = JSON.parse(mesg.substring(10).trim());
+				this.finishStackTrace(stackresult.frames,stackresult.seq);
 			} else if (mesg.startsWith("EVTmodules: ")) {
 				if (this.launchArgs.trace){this.sendEvent(new OutputEvent(`> EVTmodules\n`, "console"));}
 				await this.updateModules(JSON.parse(mesg.substring(12).trim()));
@@ -566,6 +608,13 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		this.sendResponse(response);
 	}
 
+	private allocateRefBlock()
+	{
+		const nextRef = this.nextRef;
+		this.nextRef += 65536;
+		this.writeStdin(`__DebugAdapter.transferRef(${nextRef})`);
+	}
+
 	protected convertClientPathToDebugger(clientPath: string): string
 	{
 		if(clientPath.startsWith("output:")){return clientPath;}
@@ -590,13 +639,13 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	}
 	protected convertDebuggerPathToClient(debuggerPath: string): string
 	{
-		let matches = debuggerPath.match(/^@__(.*?)__\/(.*)$/);
+		const matches = debuggerPath.match(/^@__(.*?)__\/(.*)$/);
 		if (matches)
 		{
-			let thismodule = this._modules.get(matches[1]);
+			const thismodule = this._modules.get(matches[1]);
 			if (thismodule?.symbolFilePath)
 			{
-				return path.posix.join(thismodule.symbolFilePath,matches[2]);
+				return vscode.Uri.joinPath(vscode.Uri.parse(thismodule.symbolFilePath),matches[2]).toString();
 			}
 		}
 
@@ -605,10 +654,10 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 
 	protected setBreakPointsRequest(response: DebugProtocol.SetBreakpointsResponse, args: DebugProtocol.SetBreakpointsArguments): void {
 		let bpuri:vscode.Uri;
-		let inpath = <string>args.source.path;
+		const inpath = <string>args.source.path;
 		if (inpath.match(/^[a-zA-Z]:/)) // matches c:\... or c:/... style windows paths, single drive letter
 		{
-			bpuri = vscode.Uri.parse("file:/"+inpath.replace(/\\/g,"/"));
+			bpuri = vscode.Uri.file(inpath.replace(/\\/g,"/"));
 		}
 		else // everything else is already a URI
 		{
@@ -646,15 +695,16 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	protected async stackTraceRequest(response: DebugProtocol.StackTraceResponse, args: DebugProtocol.StackTraceArguments) {
 
 		const startFrame = typeof args.startFrame === 'number' ? args.startFrame : 0;
-		const maxLevels = typeof args.levels === 'number' ? args.levels : 1000;
-		const endFrame = startFrame + maxLevels;
 
-		const stk = await new Promise<DebugProtocol.StackFrame[]>((resolve)=>{
-			this._stack = resolve;
-			this.writeStdin(`__DebugAdapter.stackTrace(${startFrame},${endFrame-startFrame})`);
-		});
+		this._responses.set(response.request_seq,response);
 
-		response.body = { stackFrames: (stk||[]).map(
+		this.writeStdin(`__DebugAdapter.stackTrace(${startFrame},false,${response.request_seq})`);
+	}
+
+	private async finishStackTrace(stack:DebugProtocol.StackFrame[], seq:number) {
+		const response = <DebugProtocol.StackTraceResponse>this._responses.get(seq);
+		this._responses.delete(seq);
+		response.body = { stackFrames: (stack||[]).map(
 			(frame) =>{
 				if (frame && frame.source && frame.source.path)
 				{
@@ -719,7 +769,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 							variablesReference: 0,
 						}
 					]);
-				}, 1000);
+				}, this.launchArgs.runningTimeout ?? 2000);
 			})
 		]);
 		consume!();
@@ -741,10 +791,16 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	}
 
 	protected async setVariableRequest(response: DebugProtocol.SetVariableResponse, args: DebugProtocol.SetVariableArguments, request?: DebugProtocol.Request) {
-		response.body = await new Promise<DebugProtocol.Variable>((resolve)=>{
+		const body = await new Promise<DebugProtocol.Variable>((resolve)=>{
 			this._setvars.set(response.request_seq, resolve);
 			this.writeStdin(`__DebugAdapter.setVariable(${args.variablesReference},${luaBlockQuote(Buffer.from(args.name))},${luaBlockQuote(Buffer.from(args.value))},${response.request_seq})\n`);
 		});
+		if (body.type === "error") {
+			response.success = false;
+			response.message = body.value;
+		} else {
+			response.body = body;
+		}
 		this.sendResponse(response);
 	}
 
@@ -773,7 +829,6 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 			new Promise<EvaluateResponseBody>((resolve) => {
 				// just time out if we're in a menu with no lua running to empty the queue...
 				// in which case it's just expired anyway
-
 				setTimeout(()=>{
 					cts.cancel();
 					resolve(<EvaluateResponseBody>{
@@ -782,7 +837,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 						variablesReference: 0,
 						seq: response.request_seq,
 					});
-				}, 1000);
+				}, this.launchArgs.runningTimeout ?? 2000);
 			})
 		]);
 		consume!();
@@ -855,7 +910,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		const execution = await vscode.tasks.executeTask(task);
 
 		return new Promise<void>(resolve => {
-			let disposable = vscode.tasks.onDidEndTask(e => {
+			const disposable = vscode.tasks.onDidEndTask(e => {
 				if (e.execution === execution) {
 					disposable.dispose();
 					resolve();
@@ -869,13 +924,16 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		let jsonpath = uri.path;
 		if (os.platform() === "win32" && jsonpath.startsWith("/")) {jsonpath = jsonpath.substr(1);}
 		const moddata = JSON.parse(fs.readFileSync(jsonpath, "utf8"));
-		const mp = {
-			uri: uri.with({path:path.posix.dirname(uri.path)}),
-			name: moddata.name,
-			version: moddata.version,
-			info: moddata
-		};
-		this.workspaceModInfo.push(mp);
+		if (moddata)
+		{
+			const mp = {
+				uri: uri.with({path:path.posix.dirname(uri.path)}),
+				name: moddata.name,
+				version: moddata.version,
+				info: moddata
+			};
+			this.workspaceModInfo.push(mp);
+		}
 	}
 
 	private createSteamAppID(factorioPath:string)
@@ -918,7 +976,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		if (this.launchArgs.trace) {
 			this.sendEvent(new OutputEvent(`${this.inPrompt?"<":"q<"} ${s instanceof Buffer ? `Buffer[${s.length}]` : s.replace(/^[\r\n]*/,"").replace(/[\r\n]*$/,"")}\n`,"console"));
 		}
-		let b = Buffer.concat([s instanceof Buffer ? s : Buffer.from(s),Buffer.from("\n")]);
+		const b = Buffer.concat([s instanceof Buffer ? s : Buffer.from(s),Buffer.from("\n")]);
 		if (this.inPrompt)
 		{
 			this.factorio.writeStdin(b);
@@ -927,7 +985,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		}
 		else
 		{
-			let p = new Promise<boolean>((resolve)=>
+			const p = new Promise<boolean>((resolve)=>
 			this.stdinQueue.push({buffer:b,resolve:resolve,consumed:consumed,token:token}));
 			return p;
 		}
@@ -987,7 +1045,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 		this.inPrompt = false;
 	}
 
-	public continueRequire(shouldRequire:boolean) {
+	public continueRequire(shouldRequire:boolean,modname:string) {
 		if (!this.inPrompt)
 		{
 			if (this.launchArgs.trace) { this.sendEvent(new OutputEvent(`!! Attempted to continueRequire while not in a prompt\n`, "console")); }
@@ -1005,7 +1063,21 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 			}
 			if (this.launchArgs.runningBreak !== undefined)
 			{
-				hookopts += `runningBreak=${this.launchArgs.runningBreak}`;
+				hookopts += `runningBreak=${this.launchArgs.runningBreak},`;
+			}
+			if (this.launchArgs.checkEvents !== undefined)
+			{
+				hookopts += `checkEvents=${
+					Array.isArray(this.launchArgs.checkEvents)?
+					this.launchArgs.checkEvents.includes(modname):
+					this.launchArgs.checkEvents},`;
+			}
+			if (this.launchArgs.checkGlobals !== undefined)
+			{
+				hookopts += `checkGlobals=${
+					Array.isArray(this.launchArgs.checkGlobals)?
+					this.launchArgs.checkGlobals.includes(modname):
+					this.launchArgs.checkGlobals},`;
 			}
 
 			this.writeStdin(`__DebugAdapter={${hookopts}}`);
@@ -1073,7 +1145,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 			if (module.name === "core" || module.name === "base")
 			{
 				// find `core` and `base` in data
-				module.symbolFilePath = vscode.Uri.parse("file:/"+path.posix.join(this.launchArgs.dataPath,module.name)).toString();
+				module.symbolFilePath = vscode.Uri.joinPath(vscode.Uri.file(this.launchArgs.dataPath),module.name).toString();
 				module.symbolStatus = "Loaded Data Directory";
 				FactorioModDebugSession.output.appendLine(`loaded ${module.name} from data ${module.symbolFilePath}`);
 				continue;
@@ -1101,9 +1173,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 						{
 
 							const modinfo:ModInfo = JSON.parse(Buffer.from(
-								await vscode.workspace.fs.readFile(
-									dir.with({path: path.posix.join(dir.path,"info.json")})
-									)).toString("utf8"));
+								await vscode.workspace.fs.readFile(vscode.Uri.joinPath(dir,"info.json"))).toString("utf8"));
 							if (modinfo.name===module.name && semver.eq(modinfo.version,module.version!))
 							{
 								module.symbolFilePath = dir.toString();
@@ -1126,17 +1196,17 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 
 				// find it in mods dir:
 				// 1) unversioned folder
-				let dir = vscode.Uri.parse("file:/"+ path.resolve(this.launchArgs.modsPath,module.name).replace(/\\/g,"/"));
+				let dir = vscode.Uri.joinPath(vscode.Uri.file(this.launchArgs.modsPath),module.name);
 				if(await trydir(dir)){continue;};
 
 				// 2) versioned folder
-				dir = vscode.Uri.parse("file:/"+ path.resolve(this.launchArgs.modsPath,module.name+"_"+module.version).replace(/\\/g,"/"));
+				dir = vscode.Uri.joinPath(vscode.Uri.file(this.launchArgs.modsPath),module.name+"_"+module.version);
 				if(await trydir(dir)){continue;};
 
 				// 3) versioned zip
 				if (zipext)
 				{
-					const zipuri = vscode.Uri.parse("file:/"+ path.resolve(this.launchArgs.modsPath,module.name+"_"+module.version+".zip").replace(/\\/g,"/"));
+					const zipuri = vscode.Uri.joinPath(vscode.Uri.file(this.launchArgs.modsPath),module.name+"_"+module.version+".zip");
 					let stat:vscode.FileStat|undefined;
 					try
 					{
@@ -1159,7 +1229,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 							//TODO: mount it fast enough to actually read dirname inside
 							vscode.commands.executeCommand("zipexplorer.exploreZipFile", zipuri);
 
-							let zipinside = zipuri.with({scheme: "zip", path: path.posix.join(zipuri.path,module.name+"_"+module.version)});
+							const zipinside = vscode.Uri.joinPath(zipuri,module.name+"_"+module.version).with({scheme: "zip"});
 							module.symbolFilePath = zipinside.toString();
 							module.symbolStatus = "Loaded Zip";
 							FactorioModDebugSession.output.appendLine(`loaded ${module.name} ${module.version} from mod zip ${zipuri.toString()}`);
@@ -1183,7 +1253,7 @@ export class FactorioModDebugSession extends LoggingDebugSession {
 	}
 
 	updateBreakpoints(updateAll:boolean = false) {
-		let changes = Array<Buffer>();
+		const changes = Array<Buffer>();
 
 		this.breakPoints.forEach((breakpoints:DebugProtocol.SourceBreakpoint[], filename:string) => {
 			if (updateAll || this.breakPointsChanged.has(filename))
